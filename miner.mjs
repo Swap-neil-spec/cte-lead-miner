@@ -119,16 +119,33 @@ async function post(rows) {
   } catch { return 0; }
 }
 
+// Live "on the go" coverage: pull the current top ~300 most-starred repos from
+// GitHub search, so we always mine what's hot (falls back to the seed list).
+async function fetchTopRepos() {
+  const names = [];
+  for (let page = 1; page <= 3; page++) {
+    try {
+      const res = await j(`https://api.github.com/search/repositories?q=stars:>5000&sort=stars&order=desc&per_page=100&page=${page}`);
+      for (const r of (res.items || [])) if (r.full_name) names.push(r.full_name);
+      await sleep(1500); // be gentle on the search rate limit
+    } catch { break; }
+  }
+  // merge dynamic top repos with the curated seed list, de-duped
+  return [...new Set([...names, ...REPOS])];
+}
+
 (async () => {
   if (!BASE || !GH || !process.env.NETLIFY_AUTH) {
     console.error("Missing env: NETLIFY_BASE / NETLIFY_AUTH / GH_TOKEN");
     process.exit(1);
   }
-  // Rotate a batch each run so we cover all repos over time.
+  const pool = await fetchTopRepos();
+  console.log(`repo pool: ${pool.length}`);
+  // Rotate a big batch each run so we cover the whole pool over time.
   const run = Number(process.env.GITHUB_RUN_NUMBER || 0);
-  const BATCH = 24;
-  const start = (run * BATCH) % REPOS.length;
-  const batch = Array.from({ length: BATCH }, (_, i) => REPOS[(start + i) % REPOS.length]);
+  const BATCH = 40;
+  const start = (run * BATCH) % pool.length;
+  const batch = Array.from({ length: BATCH }, (_, i) => pool[(start + i) % pool.length]);
 
   let mined = 0, stored = 0;
   for (const repo of batch) {
