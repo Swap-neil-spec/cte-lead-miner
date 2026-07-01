@@ -56,16 +56,37 @@ async function paraPage(size = 60) {
   }
 }
 
-// --- Netlify ingest, batched -------------------------------------------------
-let buffer = [];
-const FLUSH_AT = 40; // push when the buffer reaches this many rows…
-async function flush(force) {
-  if (!buffer.length || (!force && buffer.length < FLUSH_AT)) return 0;
-  const chunk = buffer;
-  buffer = [];
+// --- Netlify ingest, batched PER SOURCE, attributed by NET-NEW ---------------
+// Buffers are kept per source so each flush learns that source's fresh-yield
+// (newlyStored / mined). Attributing NET-NEW (not gross mined) is what lets
+// auto-double-down abandon an exhausted source (e.g. Parachute after a full pass,
+// where every row is a dedup) and pour effort into sources still producing FRESH
+// leads — essential when the goal is 100k *new* records.
+const SOURCES = ["parachute", "repo", "prom", "npm"];
+const buffers = { parachute: [], repo: [], prom: [], npm: [] };
+const pending = { parachute: {}, repo: {}, prom: {}, npm: {} }; // sliceKey -> gross since last flush
+const FLUSH_AT = 40;
+let totalBuffered = () => SOURCES.reduce((a, s) => a + buffers[s].length, 0);
+function stash(source, sliceKey, rows) {
+  buffers[source].push(...rows);
+  pending[source][sliceKey] = (pending[source][sliceKey] || 0) + rows.length;
+}
+async function flushSource(source, force) {
+  const buf = buffers[source];
+  if (!buf.length || (!force && buf.length < FLUSH_AT)) return 0;
+  buffers[source] = [];
+  const pend = pending[source]; pending[source] = {};
+  const gross = buf.length;
   let stored = 0;
-  for (let i = 0; i < chunk.length; i += 100) stored += await post(chunk.slice(i, i + 100));
-  await reportStats(); // teach the adaptive loop what's working
+  for (let i = 0; i < buf.length; i += 100) stored += await post(buf.slice(i, i + 100));
+  const freshRatio = gross ? stored / gross : 0; // 1.0 = all fresh, 0 = fully exhausted
+  for (const [k, g] of Object.entries(pend)) bumpYield(k, g * freshRatio); // net-new attribution
+  return stored;
+}
+async function flush(force) {
+  let stored = 0;
+  for (const s of SOURCES) stored += await flushSource(s, force);
+  if (stored > 0 || force) await reportStats(); // teach the loop what's producing FRESH leads
   return stored;
 }
 
@@ -134,31 +155,31 @@ async function tick() {
     // Bigger pages when Parachute is the runaway winner (double-down on depth too).
     const size = topSource() === "parachute" ? 90 : 60;
     const rows = await paraPage(size);
-    buffer.push(...rows); bumpYield("parachute", rows.length);
+    stash("parachute", "parachute", rows);
     return `parachute +${rows.length}`;
   }
   if (type === "prom") {
     const q = pickAdaptive(PROM_TIERS, "prom:");
     const rows = await mineProminent(q, 8);
-    buffer.push(...rows); bumpYield(`prom:${q}`, rows.length);
+    stash("prom", `prom:${q}`, rows);
     return `prominent[${q}] +${rows.length}`;
   }
   if (type === "npm") {
     const q = pickAdaptive(NPM_TOPICS, "npm:");
     const rows = await mineNpm(q, 10);
-    buffer.push(...rows); bumpYield(`npm:${q}`, rows.length);
+    stash("npm", `npm:${q}`, rows);
     return `npm[${q}] +${rows.length}`;
   }
   // repo: mine one, then keep digging deeper WHILE it stays hot (auto-double-down).
   const repo = batch[bi++];
   if (!repo) return "idle";
   let page = 1, got = await mineRepo(repo.name, page);
-  buffer.push(...got); bumpYield(`repolang:${repo.lang}`, got.length);
+  stash("repo", `repolang:${repo.lang}`, got);
   let extra = 0;
   while (got.length >= 3 && page < 4) { // very hot repos get pages 2, 3, 4
     page++;
     got = await mineRepo(repo.name, page);
-    buffer.push(...got); bumpYield(`repolang:${repo.lang}`, got.length);
+    stash("repo", `repolang:${repo.lang}`, got);
     extra += got.length;
   }
   return extra ? `${repo.name} +${got.length + extra} (deep x${page})` : `${repo.name} +${got.length}`;
@@ -184,7 +205,7 @@ async function tick() {
       // Time-flush every ~2 min even if the buffer is small, so nothing lingers.
       const stored = await flush(t % 6 === 0);
       totalStored += stored;
-      if (what !== "idle") console.log(`t${t}: ${what}  (buffer ${buffer.length}, stored ${totalStored})`);
+      if (what !== "idle") console.log(`t${t}: ${what}  (buffer ${totalBuffered()}, stored ${totalStored})`);
     } catch (e) {
       console.log(`t${t} error: ${e?.message || e}`);
       await sleep(3000);

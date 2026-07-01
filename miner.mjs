@@ -280,6 +280,19 @@ const REPO_QUERIES = [
   "stars:400..1000 language:swift", "stars:400..1000 language:kotlin",
   "stars:300..800 language:python pushed:>2026-03-01",
   "stars:300..800 language:typescript pushed:>2026-03-01",
+  // long tail — the deep pool for 100k (still active, professional projects)
+  "stars:120..400 language:python pushed:>2026-01-01",
+  "stars:120..400 language:javascript pushed:>2026-01-01",
+  "stars:120..400 language:typescript pushed:>2026-01-01",
+  "stars:120..400 language:go pushed:>2026-01-01",
+  "stars:120..400 language:rust pushed:>2026-01-01",
+  "stars:120..400 language:java pushed:>2026-01-01",
+  "stars:80..250 language:c++ pushed:>2026-01-01",
+  "stars:80..250 language:c# pushed:>2026-01-01",
+  "stars:80..250 language:ruby pushed:>2026-01-01",
+  "stars:80..250 language:php pushed:>2026-01-01",
+  "stars:80..250 language:kotlin pushed:>2026-01-01",
+  "stars:80..250 language:swift pushed:>2026-01-01",
 ];
 // Skip student/course/tutorial repos -> bias to working-age professional devs.
 const REPO_SKIP = /(tutorial|homework|assignment|bootcamp|cs50|100-?days|freecodecamp|awesome[-_]|[-_]awesome|coding-?interview|leet-?code|hacktoberfest|^examples?$|[-_]examples?$|learn[-_]|[-_]learning|roadmap|cheat-?sheet|interview|[-_]course|[-_]book|[-_]notes|study|beginner|for-?beginners|hello-?world|my-?portfolio|test-?repo|playground|sandbox)/i;
@@ -342,33 +355,36 @@ async function runOnce() {
 
   let mined = 0, stored = 0;
 
+  const postAll = async (rows) => { let s = 0; for (let i = 0; i < rows.length; i += 100) s += await post(rows.slice(i, i + 100)); return s; };
+
   // Prominent devs (high-followed = high-star talent) — adaptively pick a tier.
   const promTier = pickAdaptive(PROM_TIERS, "prom:");
   const prom = await mineProminent(promTier);
-  for (let i = 0; i < prom.length; i += 100) stored += await post(prom.slice(i, i + 100));
-  mined += prom.length; bumpYield(`prom:${promTier}`, prom.length);
-  console.log(`prominent devs [${promTier}]: ${prom.length} complete leads`);
+  const promNew = await postAll(prom);
+  stored += promNew; mined += prom.length; bumpYield(`prom:${promTier}`, promNew); // net-new attribution
+  console.log(`prominent devs [${promTier}]: ${prom.length} mined, ${promNew} fresh`);
 
   // npm authors (Parachute-style email-in-data directory) — adaptively pick a topic.
   const npmTopic = pickAdaptive(NPM_TOPICS, "npm:");
   const npm = await mineNpm(npmTopic);
-  for (let i = 0; i < npm.length; i += 100) stored += await post(npm.slice(i, i + 100));
-  mined += npm.length; bumpYield(`npm:${npmTopic}`, npm.length);
-  console.log(`npm authors [${npmTopic}]: ${npm.length} complete leads`);
+  const npmNew = await postAll(npm);
+  stored += npmNew; mined += npm.length; bumpYield(`npm:${npmTopic}`, npmNew);
+  console.log(`npm authors [${npmTopic}]: ${npm.length} mined, ${npmNew} fresh`);
 
   for (const repo of batch) {
     const rows = await mineRepo(repo.name);
-    for (let i = 0; i < rows.length; i += 100) stored += await post(rows.slice(i, i + 100));
-    mined += rows.length; bumpYield(`repolang:${repo.lang}`, rows.length);
-    // Winner-following: a repo that produced well gets a second page mined now.
-    if (rows.length >= 3) {
-      const more = await mineRepo(repo.name, 2);
-      for (let i = 0; i < more.length; i += 100) stored += await post(more.slice(i, i + 100));
-      mined += more.length; bumpYield(`repolang:${repo.lang}`, more.length);
-      console.log(`${repo.name}: ${rows.length}+${more.length} (hot -> deep) complete leads`);
-    } else {
-      console.log(`${repo.name}: ${rows.length} complete leads`);
+    let sNew = await postAll(rows);
+    mined += rows.length;
+    // Winner-following: keep digging deeper WHILE the repo stays hot (fresh-yield).
+    let page = 1, last = rows.length;
+    while (last >= 3 && page < 4) {
+      page++;
+      const more = await mineRepo(repo.name, page);
+      sNew += await postAll(more);
+      mined += more.length; last = more.length;
     }
+    stored += sNew; bumpYield(`repolang:${repo.lang}`, sNew);
+    console.log(`${repo.name}: ${sNew} fresh${page > 1 ? ` (deep x${page})` : ""}`);
   }
 
   await reportStats(); // teach the next run what worked
