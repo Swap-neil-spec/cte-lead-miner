@@ -13,6 +13,53 @@ const ghHeaders = { Accept: "application/vnd.github+json", Authorization: `Beare
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
+// --- Adaptive: learn which slices produce leads and double down automatically -
+// The backend (/api/miner-stats) keeps cumulative per-slice yield. Each run we
+// load it, bias effort toward high-yield slices (exploit) while still trying
+// others (explore + optimistic init), then report this run's yield back.
+let STATS = {};                     // { sliceKey: { leads, runs } }
+const YIELD = {};                   // this run's per-slice yield to report back
+const RUN = Number(process.env.GITHUB_RUN_NUMBER || 0);
+function bumpYield(key, n) { if (key) YIELD[key] = (YIELD[key] || 0) + (n || 0); }
+async function loadStats() {
+  try {
+    const r = await fetch(`${BASE}/api/miner-stats`, { headers: { Authorization: AUTH } });
+    STATS = (await r.json()).slices || {};
+  } catch { STATS = {}; }
+}
+async function reportStats() {
+  const updates = Object.entries(YIELD).map(([key, leads]) => ({ key, leads }));
+  if (!updates.length) return;
+  try {
+    await fetch(`${BASE}/api/miner-stats`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json", Authorization: AUTH },
+      body: JSON.stringify({ updates }),
+    });
+  } catch {}
+}
+// Smoothed yield-per-run. Unseen slices get an optimistic score (explore new);
+// low-yield slices decay but never hit zero (Laplace smoothing = second chances).
+function score(key) {
+  const s = STATS[key];
+  if (!s || !s.runs) return 8;
+  return (s.leads + 2) / (s.runs + 1);
+}
+// Pick one slice: exploit the best 4 of every 5 runs, rotate-explore the 5th.
+function pickAdaptive(items, prefix) {
+  if (RUN % 5 === 4) return items[RUN % items.length];
+  return [...items].sort((a, b) => score(prefix + b) - score(prefix + a))[0];
+}
+
+const PROM_TIERS = [
+  "followers:>3000", "followers:1500..3000", "followers:800..1500",
+  "followers:500..800", "followers:300..500 language:python",
+  "followers:300..500 language:javascript", "followers:300..500 language:go",
+  "followers:300..500 language:rust",
+];
+const NPM_TOPICS = ["react", "typescript", "cli", "api", "server", "graphql",
+  "testing", "vite", "nextjs", "node", "database", "ai"];
+
 // Broad set of top repos across languages/domains. Extend freely — more repos =
 // more coverage. A batch is mined each run (rotated by run number).
 const REPOS = [
@@ -69,10 +116,10 @@ async function socials(login) {
   } catch { return ""; }
 }
 
-async function mineRepo(repo) {
+async function mineRepo(repo, page = 1) {
   const rows = [];
   let commits;
-  try { commits = await j(`https://api.github.com/repos/${repo}/commits?per_page=100`); }
+  try { commits = await j(`https://api.github.com/repos/${repo}/commits?per_page=100&page=${page}`); }
   catch { return rows; }
   if (!Array.isArray(commits)) return rows;
   const byLogin = {};
@@ -146,14 +193,7 @@ async function leadFromLogin(login, fallbackEmail) {
 
 // PROMINENT DEVS: highly-followed developers (proxy for high GitHub stars) — the
 // accomplished, in-demand talent. One follower tier per run, rotating.
-async function mineProminent() {
-  const tiers = [
-    "followers:>3000", "followers:1500..3000", "followers:800..1500",
-    "followers:500..800", "followers:300..500 language:python",
-    "followers:300..500 language:javascript", "followers:300..500 language:go",
-    "followers:300..500 language:rust",
-  ];
-  const q = tiers[Number(process.env.GITHUB_RUN_NUMBER || 0) % tiers.length];
+async function mineProminent(q) {
   let logins = [];
   try {
     const res = await j(`https://api.github.com/search/users?q=${encodeURIComponent(q)}&sort=followers&order=desc&per_page=100`);
@@ -170,10 +210,7 @@ async function mineProminent() {
 // NPM AUTHORS: a Parachute-style email-in-data directory — the npm registry exposes
 // maintainer/author emails; LinkedIn resolves via the package's GitHub owner.
 // Package authors are professional JS/TS devs; one topic slice per run, rotating.
-async function mineNpm() {
-  const topics = ["react", "typescript", "cli", "api", "server", "graphql",
-    "testing", "vite", "nextjs", "node", "database", "ai"];
-  const q = topics[Number(process.env.GITHUB_RUN_NUMBER || 0) % topics.length];
+async function mineNpm(q) {
   let objs = [];
   try {
     const r = await fetch(`https://registry.npmjs.org/-/v1/search?text=${encodeURIComponent(q)}&size=100`);
@@ -224,16 +261,41 @@ const REPO_QUERIES = [
 const REPO_SKIP = /(tutorial|homework|assignment|bootcamp|cs50|100-?days|freecodecamp|awesome[-_]|[-_]awesome|coding-?interview|leet-?code|hacktoberfest|^examples?$|[-_]examples?$|learn[-_]|[-_]learning|roadmap|cheat-?sheet|interview|[-_]course|[-_]book|[-_]notes|study|beginner|for-?beginners|hello-?world|my-?portfolio|test-?repo|playground|sandbox)/i;
 
 async function fetchTopRepos() {
-  const names = new Set();
+  const out = [];
+  const seen = new Set();
   for (const q of REPO_QUERIES) {
     try {
       const res = await j(`https://api.github.com/search/repositories?q=${encodeURIComponent(q)}&sort=stars&order=desc&per_page=100`);
-      for (const r of (res.items || [])) if (r.full_name && !REPO_SKIP.test(r.full_name)) names.add(r.full_name);
+      for (const r of (res.items || [])) {
+        if (r.full_name && !REPO_SKIP.test(r.full_name) && !seen.has(r.full_name)) {
+          seen.add(r.full_name);
+          out.push({ name: r.full_name, lang: String(r.language || "other").toLowerCase() });
+        }
+      }
       await sleep(2200); // GitHub search: 30 req/min
     } catch {}
   }
-  REPOS.forEach((r) => names.add(r));
-  return [...names];
+  for (const r of REPOS) if (!seen.has(r)) out.push({ name: r, lang: "seed" });
+  return out;
+}
+
+// Build this run's repo batch: allocate more slots to high-yield LANGUAGES
+// (double down on winners), and rotate WITHIN each language so we still hit fresh
+// repos every run (keeps expanding coverage automatically).
+function buildBatch(pool, size) {
+  const byLang = {};
+  for (const r of pool) (byLang[r.lang] ||= []).push(r);
+  const langs = Object.keys(byLang);
+  const weights = langs.map((l) => Math.max(0.25, score(`repolang:${l}`)));
+  const total = weights.reduce((a, b) => a + b, 0) || 1;
+  const batch = [];
+  langs.forEach((l, i) => {
+    const n = Math.max(1, Math.round(size * (weights[i] / total)));
+    const arr = byLang[l];
+    const start = (RUN * n) % arr.length;
+    for (let k = 0; k < n; k++) batch.push(arr[(start + k) % arr.length]);
+  });
+  return batch.slice(0, size);
 }
 
 (async () => {
@@ -241,33 +303,43 @@ async function fetchTopRepos() {
     console.error("Missing env: NETLIFY_BASE / NETLIFY_AUTH / GH_TOKEN");
     process.exit(1);
   }
+  await loadStats(); // learn from prior runs
   const pool = await fetchTopRepos();
-  console.log(`repo pool: ${pool.length}`);
-  // Rotate a big batch each run so we cover the whole pool over time.
-  const run = Number(process.env.GITHUB_RUN_NUMBER || 0);
   const BATCH = 55;
-  const start = (run * BATCH) % pool.length;
-  const batch = Array.from({ length: BATCH }, (_, i) => pool[(start + i) % pool.length]);
+  const batch = buildBatch(pool, BATCH);
+  console.log(`repo pool: ${pool.length}, batch: ${batch.length} (yield-weighted by language)`);
 
   let mined = 0, stored = 0;
 
-  // Prominent devs first (high-followed = high-star talent) — one tier per run.
-  const prom = await mineProminent();
+  // Prominent devs (high-followed = high-star talent) — adaptively pick a tier.
+  const promTier = pickAdaptive(PROM_TIERS, "prom:");
+  const prom = await mineProminent(promTier);
   for (let i = 0; i < prom.length; i += 100) stored += await post(prom.slice(i, i + 100));
-  mined += prom.length;
-  console.log(`prominent devs: ${prom.length} complete leads`);
+  mined += prom.length; bumpYield(`prom:${promTier}`, prom.length);
+  console.log(`prominent devs [${promTier}]: ${prom.length} complete leads`);
 
-  // npm authors (Parachute-style email-in-data directory) — one topic per run.
-  const npm = await mineNpm();
+  // npm authors (Parachute-style email-in-data directory) — adaptively pick a topic.
+  const npmTopic = pickAdaptive(NPM_TOPICS, "npm:");
+  const npm = await mineNpm(npmTopic);
   for (let i = 0; i < npm.length; i += 100) stored += await post(npm.slice(i, i + 100));
-  mined += npm.length;
-  console.log(`npm authors: ${npm.length} complete leads`);
+  mined += npm.length; bumpYield(`npm:${npmTopic}`, npm.length);
+  console.log(`npm authors [${npmTopic}]: ${npm.length} complete leads`);
 
   for (const repo of batch) {
-    const rows = await mineRepo(repo);
+    const rows = await mineRepo(repo.name);
     for (let i = 0; i < rows.length; i += 100) stored += await post(rows.slice(i, i + 100));
-    mined += rows.length;
-    console.log(`${repo}: ${rows.length} complete leads`);
+    mined += rows.length; bumpYield(`repolang:${repo.lang}`, rows.length);
+    // Winner-following: a repo that produced well gets a second page mined now.
+    if (rows.length >= 3) {
+      const more = await mineRepo(repo.name, 2);
+      for (let i = 0; i < more.length; i += 100) stored += await post(more.slice(i, i + 100));
+      mined += more.length; bumpYield(`repolang:${repo.lang}`, more.length);
+      console.log(`${repo.name}: ${rows.length}+${more.length} (hot -> deep) complete leads`);
+    } else {
+      console.log(`${repo.name}: ${rows.length} complete leads`);
+    }
   }
+
+  await reportStats(); // teach the next run what worked
   console.log(`DONE — mined ${mined} complete leads, ${stored} newly stored in backend.`);
 })();
