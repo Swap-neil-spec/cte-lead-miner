@@ -5,8 +5,15 @@
 // Posts them to the engine's /api/ingest, which gates + dedups + persists.
 //
 // $0: all GitHub endpoints are free (read-only token). No paid API touched.
+//
+// This file also EXPORTS its helpers so the continuous loop (loop.mjs) reuses the
+// exact same mining + gate-row logic — one source of truth. The one-shot run at the
+// bottom only executes when this file is run directly (guarded by isMain).
 
-const BASE = process.env.NETLIFY_BASE;
+import { pathToFileURL } from "node:url";
+const isMain = process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href;
+
+export const BASE = process.env.NETLIFY_BASE;
 const AUTH = "Basic " + Buffer.from(process.env.NETLIFY_AUTH || "").toString("base64"); // "user:pass"
 const GH = process.env.GH_TOKEN;
 const ghHeaders = { Accept: "application/vnd.github+json", Authorization: `Bearer ${GH}`, "User-Agent": "cte-lead-miner" };
@@ -193,11 +200,11 @@ async function leadFromLogin(login, fallbackEmail) {
 
 // PROMINENT DEVS: highly-followed developers (proxy for high GitHub stars) — the
 // accomplished, in-demand talent. One follower tier per run, rotating.
-async function mineProminent(q) {
+async function mineProminent(q, limit = 100) {
   let logins = [];
   try {
     const res = await j(`https://api.github.com/search/users?q=${encodeURIComponent(q)}&sort=followers&order=desc&per_page=100`);
-    logins = (res.items || []).map((u) => u.login).filter(Boolean);
+    logins = (res.items || []).map((u) => u.login).filter(Boolean).slice(0, limit);
   } catch { return []; }
   const rows = [];
   for (const login of logins) {
@@ -210,11 +217,11 @@ async function mineProminent(q) {
 // NPM AUTHORS: a Parachute-style email-in-data directory — the npm registry exposes
 // maintainer/author emails; LinkedIn resolves via the package's GitHub owner.
 // Package authors are professional JS/TS devs; one topic slice per run, rotating.
-async function mineNpm(q) {
+async function mineNpm(q, limit = 100) {
   let objs = [];
   try {
     const r = await fetch(`https://registry.npmjs.org/-/v1/search?text=${encodeURIComponent(q)}&size=100`);
-    objs = (await r.json()).objects || [];
+    objs = ((await r.json()).objects || []).slice(0, limit);
   } catch { return []; }
   const rows = [];
   const seenOwner = new Set();
@@ -298,7 +305,14 @@ function buildBatch(pool, size) {
   return batch.slice(0, size);
 }
 
-(async () => {
+export {
+  AUTH, sleep, j, socials, mineRepo, commitEmail, leadFromLogin,
+  mineProminent, mineNpm, post, fetchTopRepos, buildBatch,
+  loadStats, reportStats, bumpYield, pickAdaptive, score,
+  PROM_TIERS, NPM_TOPICS,
+};
+
+async function runOnce() {
   if (!BASE || !GH || !process.env.NETLIFY_AUTH) {
     console.error("Missing env: NETLIFY_BASE / NETLIFY_AUTH / GH_TOKEN");
     process.exit(1);
@@ -342,4 +356,6 @@ function buildBatch(pool, size) {
 
   await reportStats(); // teach the next run what worked
   console.log(`DONE — mined ${mined} complete leads, ${stored} newly stored in backend.`);
-})();
+}
+
+if (isMain) runOnce();
