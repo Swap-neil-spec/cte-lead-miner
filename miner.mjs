@@ -106,6 +106,94 @@ async function mineRepo(repo) {
   return rows;
 }
 
+// Commit-email for a single login (for prominent devs without a public email).
+async function commitEmail(login) {
+  try {
+    const events = await j(`https://api.github.com/users/${login}/events/public?per_page=100`);
+    const counts = {};
+    for (const ev of (Array.isArray(events) ? events : [])) {
+      if (ev.type !== "PushEvent") continue;
+      for (const c of (ev.payload?.commits || [])) {
+        const e = validEmail(c.author?.email);
+        if (e) counts[e] = (counts[e] || 0) + 1;
+      }
+    }
+    const best = Object.entries(counts).sort((a, b) => b[1] - a[1])[0];
+    return best ? best[0] : null;
+  } catch { return null; }
+}
+
+// Build a COMPLETE lead from a GitHub login: profile -> LinkedIn (socials/blog/bio)
+// + email (public / provided fallback / commit-email). Returns null if incomplete.
+async function leadFromLogin(login, fallbackEmail) {
+  try {
+    const p = await j(`https://api.github.com/users/${login}`);
+    if (p.type !== "User") return null; // skip orgs
+    const li = findLinkedin(`${await socials(login)} ${p.blog || ""} ${p.bio || ""}`);
+    if (!li) return null;
+    const email = validEmail(p.email) || validEmail(fallbackEmail) || await commitEmail(login);
+    if (!email) return null;
+    const name = String(p.name || "").trim();
+    const parts = name.split(/\s+/).filter(Boolean);
+    if (parts.length < 2) return null;
+    return {
+      "First name": parts[0], "Last name": parts.slice(1).join(" "),
+      Email: email, LinkedIn: li, Location: p.location || "",
+      Role: "software_engineer", Source: "contributors",
+    };
+  } catch { return null; }
+}
+
+// PROMINENT DEVS: highly-followed developers (proxy for high GitHub stars) — the
+// accomplished, in-demand talent. One follower tier per run, rotating.
+async function mineProminent() {
+  const tiers = [
+    "followers:>3000", "followers:1500..3000", "followers:800..1500",
+    "followers:500..800", "followers:300..500 language:python",
+    "followers:300..500 language:javascript", "followers:300..500 language:go",
+    "followers:300..500 language:rust",
+  ];
+  const q = tiers[Number(process.env.GITHUB_RUN_NUMBER || 0) % tiers.length];
+  let logins = [];
+  try {
+    const res = await j(`https://api.github.com/search/users?q=${encodeURIComponent(q)}&sort=followers&order=desc&per_page=100`);
+    logins = (res.items || []).map((u) => u.login).filter(Boolean);
+  } catch { return []; }
+  const rows = [];
+  for (const login of logins) {
+    const row = await leadFromLogin(login);
+    if (row) { rows.push(row); await sleep(45); }
+  }
+  return rows;
+}
+
+// NPM AUTHORS: a Parachute-style email-in-data directory — the npm registry exposes
+// maintainer/author emails; LinkedIn resolves via the package's GitHub owner.
+// Package authors are professional JS/TS devs; one topic slice per run, rotating.
+async function mineNpm() {
+  const topics = ["react", "typescript", "cli", "api", "server", "graphql",
+    "testing", "vite", "nextjs", "node", "database", "ai"];
+  const q = topics[Number(process.env.GITHUB_RUN_NUMBER || 0) % topics.length];
+  let objs = [];
+  try {
+    const r = await fetch(`https://registry.npmjs.org/-/v1/search?text=${encodeURIComponent(q)}&size=100`);
+    objs = (await r.json()).objects || [];
+  } catch { return []; }
+  const rows = [];
+  const seenOwner = new Set();
+  for (const o of objs) {
+    const pkg = o.package || {};
+    const repoUrl = pkg.links?.repository || "";
+    const m = repoUrl.match(/github\.com[/:]([A-Za-z0-9\-_.]+)\/[A-Za-z0-9\-_.]+/i);
+    const owner = m && m[1];
+    if (!owner || seenOwner.has(owner.toLowerCase())) continue;
+    seenOwner.add(owner.toLowerCase());
+    const row = await leadFromLogin(owner, pkg.publisher?.email || pkg.author?.email);
+    if (row) { row.Source = "contributors"; rows.push(row); await sleep(45); }
+  }
+  return rows;
+}
+
 async function post(rows) {
   if (!rows.length) return 0;
   try {
@@ -162,6 +250,19 @@ async function fetchTopRepos() {
   const batch = Array.from({ length: BATCH }, (_, i) => pool[(start + i) % pool.length]);
 
   let mined = 0, stored = 0;
+
+  // Prominent devs first (high-followed = high-star talent) — one tier per run.
+  const prom = await mineProminent();
+  for (let i = 0; i < prom.length; i += 100) stored += await post(prom.slice(i, i + 100));
+  mined += prom.length;
+  console.log(`prominent devs: ${prom.length} complete leads`);
+
+  // npm authors (Parachute-style email-in-data directory) — one topic per run.
+  const npm = await mineNpm();
+  for (let i = 0; i < npm.length; i += 100) stored += await post(npm.slice(i, i + 100));
+  mined += npm.length;
+  console.log(`npm authors: ${npm.length} complete leads`);
+
   for (const repo of batch) {
     const rows = await mineRepo(repo);
     for (let i = 0; i < rows.length; i += 100) stored += await post(rows.slice(i, i + 100));
