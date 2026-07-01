@@ -119,19 +119,33 @@ async function post(rows) {
   } catch { return 0; }
 }
 
-// Live "on the go" coverage: pull the current top ~300 most-starred repos from
-// GitHub search, so we always mine what's hot (falls back to the seed list).
+// Ambitious "whole open-source ecosystem" pool: many search slices (star tiers ×
+// languages × recency) -> up to ~1600 active repos, biased to professional projects.
+const REPO_QUERIES = [
+  "stars:>3000", "stars:1500..3000",
+  "stars:800..1500 language:python", "stars:800..1500 language:javascript",
+  "stars:800..1500 language:typescript", "stars:600..1500 language:go",
+  "stars:600..1500 language:rust", "stars:600..1500 language:java",
+  "stars:500..1200 language:c++", "stars:500..1200 language:c#",
+  "stars:400..1000 language:php", "stars:400..1000 language:ruby",
+  "stars:400..1000 language:swift", "stars:400..1000 language:kotlin",
+  "stars:300..800 language:python pushed:>2026-03-01",
+  "stars:300..800 language:typescript pushed:>2026-03-01",
+];
+// Skip student/course/tutorial repos -> bias to working-age professional devs.
+const REPO_SKIP = /(tutorial|homework|assignment|bootcamp|cs50|100-?days|freecodecamp|awesome[-_]|[-_]awesome|coding-?interview|leet-?code|hacktoberfest|^examples?$|[-_]examples?$|learn[-_]|[-_]learning|roadmap|cheat-?sheet|interview|[-_]course|[-_]book|[-_]notes|study|beginner|for-?beginners|hello-?world|my-?portfolio|test-?repo|playground|sandbox)/i;
+
 async function fetchTopRepos() {
-  const names = [];
-  for (let page = 1; page <= 3; page++) {
+  const names = new Set();
+  for (const q of REPO_QUERIES) {
     try {
-      const res = await j(`https://api.github.com/search/repositories?q=stars:>5000&sort=stars&order=desc&per_page=100&page=${page}`);
-      for (const r of (res.items || [])) if (r.full_name) names.push(r.full_name);
-      await sleep(1500); // be gentle on the search rate limit
-    } catch { break; }
+      const res = await j(`https://api.github.com/search/repositories?q=${encodeURIComponent(q)}&sort=stars&order=desc&per_page=100`);
+      for (const r of (res.items || [])) if (r.full_name && !REPO_SKIP.test(r.full_name)) names.add(r.full_name);
+      await sleep(2200); // GitHub search: 30 req/min
+    } catch {}
   }
-  // merge dynamic top repos with the curated seed list, de-duped
-  return [...new Set([...names, ...REPOS])];
+  REPOS.forEach((r) => names.add(r));
+  return [...names];
 }
 
 (async () => {
@@ -143,7 +157,7 @@ async function fetchTopRepos() {
   console.log(`repo pool: ${pool.length}`);
   // Rotate a big batch each run so we cover the whole pool over time.
   const run = Number(process.env.GITHUB_RUN_NUMBER || 0);
-  const BATCH = 40;
+  const BATCH = 55;
   const start = (run * BATCH) % pool.length;
   const batch = Array.from({ length: BATCH }, (_, i) => pool[(start + i) % pool.length]);
 
