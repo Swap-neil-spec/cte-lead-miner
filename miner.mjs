@@ -58,11 +58,28 @@ function pickAdaptive(items, prefix) {
   return [...items].sort((a, b) => score(prefix + b) - score(prefix + a))[0];
 }
 
+// TOP ENGINEERING TALENT — the most impactful GitHub searches (all sorted by
+// followers desc in mineProminent). Global icons + per-language leaders + the top
+// devs in each major tech hub + prolific builders. Auto-double-down concentrates
+// on whichever elite slices yield the most REACHABLE talent (public LinkedIn+email).
 const PROM_TIERS = [
-  "followers:>3000", "followers:1500..3000", "followers:800..1500",
-  "followers:500..800", "followers:300..500 language:python",
-  "followers:300..500 language:javascript", "followers:300..500 language:go",
-  "followers:300..500 language:rust",
+  // global icons / most-followed engineers on the planet
+  "followers:>10000", "followers:5000..10000", "followers:3000..5000",
+  "followers:2000..3000", "followers:1200..2000", "followers:800..1200",
+  // language leaders (top engineers per stack)
+  "followers:1500..5000 language:python", "followers:1500..5000 language:javascript",
+  "followers:1200..4000 language:typescript", "followers:1200..4000 language:go",
+  "followers:1200..4000 language:rust", "followers:1000..4000 language:java",
+  "followers:800..3000 language:c++", "followers:800..3000 language:swift",
+  "followers:800..3000 language:kotlin", "followers:800..3000 language:scala",
+  // top talent in the major tech hubs (worldwide reach)
+  'followers:600..4000 location:"San Francisco"', 'followers:600..4000 location:"New York"',
+  "followers:600..4000 location:London", "followers:600..4000 location:Berlin",
+  "followers:600..4000 location:Bangalore", "followers:600..4000 location:Singapore",
+  "followers:600..4000 location:Toronto", "followers:600..4000 location:Amsterdam",
+  "followers:600..4000 location:Paris", "followers:600..4000 location:Tokyo",
+  // prolific elite builders (depth of work, not just fame)
+  "repos:>80 followers:>1500", "repos:>50 followers:800..2500",
 ];
 const NPM_TOPICS = ["react", "typescript", "cli", "api", "server", "graphql",
   "testing", "vite", "nextjs", "node", "database", "ai"];
