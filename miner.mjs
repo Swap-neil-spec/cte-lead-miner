@@ -144,6 +144,42 @@ async function socials(login) {
   } catch { return ""; }
 }
 
+// --- GraphQL batch profile resolver (the discovery speedup) ------------------
+// Resolves up to ~40 logins' profile + social accounts in ONE request, on GitHub's
+// SEPARATE 5000-points/hr GraphQL budget — replacing 2 REST calls per contributor.
+// Same fields the REST path used (websiteUrl=blog, bio, socialAccounts), so the
+// LinkedIn/email/name gate is byte-for-byte identical; only the fetch is cheaper.
+async function gql(query) {
+  const r = await fetch("https://api.github.com/graphql", {
+    method: "POST",
+    headers: { ...ghHeaders, "Content-Type": "application/json" },
+    body: JSON.stringify({ query }),
+  });
+  if (r.status === 403 || r.status === 429) { // rate/secondary limit — back off
+    const reset = Number(r.headers.get("x-ratelimit-reset")) * 1000;
+    const wait = Math.max(2000, (reset || Date.now() + 60000) - Date.now() + 2000);
+    if (wait < 15 * 60000) { await sleep(wait); return gql(query); }
+  }
+  if (!r.ok) throw new Error(`gql ${r.status}`);
+  return r.json();
+}
+async function profilesBatch(logins) {
+  const out = {};
+  if (!logins.length) return out;
+  const f = `login name email location websiteUrl bio socialAccounts(first:6){nodes{url}}`;
+  const q = `query{` + logins.map((lg, i) => `u${i}:user(login:${JSON.stringify(lg)}){${f}}`).join(" ") + `}`;
+  let d;
+  try { d = await gql(q); } catch { return out; }
+  logins.forEach((lg, i) => { const u = d?.data?.[`u${i}`]; if (u) out[lg.toLowerCase()] = u; });
+  return out;
+}
+function socialText(p) {
+  return [p?.websiteUrl || "", p?.bio || "", ...((p?.socialAccounts?.nodes) || []).map((n) => n.url)].join(" ");
+}
+// Logins resolved this shift — skip re-fetching (server-side dedup handles re-emits,
+// so skipping a repeat costs zero leads and saves the API calls). Compounds over a run.
+const SEEN = new Set();
+
 async function mineRepo(repo, page = 1) {
   const rows = [];
   let commits;
@@ -153,30 +189,37 @@ async function mineRepo(repo, page = 1) {
   const byLogin = {};
   for (const c of commits) {
     const login = c.author?.login;
-    const email = validEmail(c.commit?.author?.email);
+    const email = validEmail(c.commit?.author?.email); // email already in the commit — no call
     const name = c.commit?.author?.name || "";
     if (!login || !email) continue;
-    if (!byLogin[login]) byLogin[login] = { login, name, email };
+    const key = login.toLowerCase();
+    if (SEEN.has(key) || byLogin[key]) continue; // skip already-resolved this shift
+    byLogin[key] = { login, name, email };
   }
-  for (const a of Object.values(byLogin)) {
-    let p;
-    try { p = await j(`https://api.github.com/users/${a.login}`); } catch { continue; }
-    const li = findLinkedin(`${await socials(a.login)} ${p.blog || ""} ${p.bio || ""}`);
-    if (!li) continue; // LinkedIn required
-    const email = validEmail(p.email) || a.email;
-    const name = String(p.name || a.name || "").trim();
-    const parts = name.split(/\s+/).filter(Boolean);
-    if (parts.length < 2) continue; // need a real full name (avoids handles)
-    rows.push({
-      "First name": parts[0],
-      "Last name": parts.slice(1).join(" "),
-      Email: email,
-      LinkedIn: li,
-      Location: p.location || "",
-      Role: "software_engineer",
-      Source: "contributors",
-    });
-    await sleep(40);
+  const entries = Object.values(byLogin);
+  for (let i = 0; i < entries.length; i += 40) {
+    const chunk = entries.slice(i, i + 40);
+    const profs = await profilesBatch(chunk.map((a) => a.login)); // 1 call resolves ~40 people
+    for (const a of chunk) {
+      SEEN.add(a.login.toLowerCase());
+      const p = profs[a.login.toLowerCase()];
+      if (!p) continue;
+      const li = findLinkedin(socialText(p));
+      if (!li) continue; // LinkedIn required — same gate as before
+      const email = validEmail(p.email) || a.email;
+      const name = String(p.name || a.name || "").trim();
+      const parts = name.split(/\s+/).filter(Boolean);
+      if (parts.length < 2) continue; // need a real full name (avoids handles)
+      rows.push({
+        "First name": parts[0],
+        "Last name": parts.slice(1).join(" "),
+        Email: email,
+        LinkedIn: li,
+        Location: p.location || "",
+        Role: "software_engineer",
+        Source: "contributors",
+      });
+    }
   }
   return rows;
 }
@@ -201,22 +244,23 @@ async function commitEmail(login) {
 // Build a COMPLETE lead from a GitHub login: profile -> LinkedIn (socials/blog/bio)
 // + email (public / provided fallback / commit-email). Returns null if incomplete.
 async function leadFromLogin(login, fallbackEmail) {
-  try {
-    const p = await j(`https://api.github.com/users/${login}`);
-    if (p.type !== "User") return null; // skip orgs
-    const li = findLinkedin(`${await socials(login)} ${p.blog || ""} ${p.bio || ""}`);
-    if (!li) return null;
-    const email = validEmail(p.email) || validEmail(fallbackEmail) || await commitEmail(login);
-    if (!email) return null;
-    const name = String(p.name || "").trim();
-    const parts = name.split(/\s+/).filter(Boolean);
-    if (parts.length < 2) return null;
-    return {
-      "First name": parts[0], "Last name": parts.slice(1).join(" "),
-      Email: email, LinkedIn: li, Location: p.location || "",
-      Role: "software_engineer", Source: "contributors",
-    };
-  } catch { return null; }
+  const key = login.toLowerCase();
+  if (SEEN.has(key)) return null;
+  SEEN.add(key);
+  const p = (await profilesBatch([login]))[key]; // 1 GraphQL call
+  if (!p) return null;
+  const li = findLinkedin(socialText(p));
+  if (!li) return null;
+  const email = validEmail(p.email) || validEmail(fallbackEmail) || await commitEmail(login);
+  if (!email) return null;
+  const name = String(p.name || "").trim();
+  const parts = name.split(/\s+/).filter(Boolean);
+  if (parts.length < 2) return null;
+  return {
+    "First name": parts[0], "Last name": parts.slice(1).join(" "),
+    Email: email, LinkedIn: li, Location: p.location || "",
+    Role: "software_engineer", Source: "contributors",
+  };
 }
 
 // PROMINENT DEVS: highly-followed developers (proxy for high GitHub stars) — the
@@ -225,12 +269,31 @@ async function mineProminent(q, limit = 100) {
   let logins = [];
   try {
     const res = await j(`https://api.github.com/search/users?q=${encodeURIComponent(q)}&sort=followers&order=desc&per_page=100`);
-    logins = (res.items || []).map((u) => u.login).filter(Boolean).slice(0, limit);
+    logins = (res.items || []).map((u) => u.login).filter(Boolean)
+      .filter((lg) => !SEEN.has(lg.toLowerCase())).slice(0, limit);
   } catch { return []; }
   const rows = [];
-  for (const login of logins) {
-    const row = await leadFromLogin(login);
-    if (row) { rows.push(row); await sleep(45); }
+  for (let i = 0; i < logins.length; i += 40) {
+    const chunk = logins.slice(i, i + 40);
+    const profs = await profilesBatch(chunk); // 1 call per ~40 elite devs
+    for (const login of chunk) {
+      SEEN.add(login.toLowerCase());
+      const p = profs[login.toLowerCase()];
+      if (!p) continue;
+      const li = findLinkedin(socialText(p));
+      if (!li) continue;
+      let email = validEmail(p.email);
+      if (!email) email = await commitEmail(login); // elite talent worth the extra call
+      if (!email) continue;
+      const name = String(p.name || "").trim();
+      const parts = name.split(/\s+/).filter(Boolean);
+      if (parts.length < 2) continue;
+      rows.push({
+        "First name": parts[0], "Last name": parts.slice(1).join(" "),
+        Email: email, LinkedIn: li, Location: p.location || "",
+        Role: "software_engineer", Source: "contributors",
+      });
+    }
   }
   return rows;
 }
