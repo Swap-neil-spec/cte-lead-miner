@@ -35,7 +35,11 @@ async function loadStats() {
   } catch { STATS = {}; }
 }
 async function reportStats() {
+  // DELTA semantics: capture the yield accrued since the last report, then CLEAR it.
+  // (reportStats is called after every flush in the continuous loop — without the
+  // clear, each call would re-post the running total and the server would double-count.)
   const updates = Object.entries(YIELD).map(([key, leads]) => ({ key, leads }));
+  for (const k of Object.keys(YIELD)) delete YIELD[k];
   if (!updates.length) return;
   try {
     await fetch(`${BASE}/api/miner-stats`, {
