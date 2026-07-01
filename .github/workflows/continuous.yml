@@ -1,0 +1,32 @@
+name: continuous-loop
+# 24/7 ~20-second discovery heartbeat on free GitHub Actions compute.
+# Runs ~5.4h per job then re-dispatches itself; the 6h schedule is a backstop.
+on:
+  workflow_dispatch: {}
+  schedule:
+    - cron: "3 */6 * * *"   # backstop: restart at least every 6h if self-dispatch misses
+
+# Exactly one loop alive at a time; a new trigger waits rather than overlapping.
+concurrency:
+  group: continuous-loop
+  cancel-in-progress: false
+
+permissions:
+  actions: write            # allow the job to re-dispatch itself for continuity
+
+jobs:
+  loop:
+    runs-on: ubuntu-latest
+    timeout-minutes: 350     # 5h50m, under the 6h hard limit
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+      - name: Continuous 20s mining loop -> engine
+        env:
+          NETLIFY_BASE: ${{ secrets.NETLIFY_BASE }}
+          NETLIFY_AUTH: ${{ secrets.NETLIFY_AUTH }}
+          GH_TOKEN: ${{ secrets.MINER_GH_TOKEN }}
+          ACTIONS_TOKEN: ${{ github.token }}
+        run: node loop.mjs
