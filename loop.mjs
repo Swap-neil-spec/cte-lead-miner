@@ -13,7 +13,7 @@
 import {
   BASE, AUTH, sleep, post, mineRepo, mineProminent, mineNpm,
   fetchTopRepos, buildBatch, loadStats, reportStats, bumpYield,
-  pickAdaptive, PROM_TIERS, NPM_TOPICS,
+  pickAdaptive, score, PROM_TIERS, NPM_TOPICS,
 } from "./miner.mjs";
 
 const GH = process.env.GH_TOKEN;
@@ -99,35 +99,69 @@ async function refreshPool() {
   console.log(`pool refreshed: ${pool.length} repos, rolling batch ${batch.length}`);
 }
 
-async function tick(t) {
+// --- AUTO-DOUBLE-DOWN ---------------------------------------------------------
+// Score each SOURCE by its best slice's live yield-per-run, then pick each tick's
+// source by weighted chance (with an exploration floor so nothing is fully starved).
+// The winner automatically earns a bigger share of the 20s heartbeats; when yields
+// shift, the mix shifts with them. Re-scored every ~5 min from fresh backend stats.
+const EXPLORE_FLOOR = 2;
+function sourceScores() {
+  const langs = pool.length ? [...new Set(pool.map((r) => r.lang))] : ["seed"];
+  return {
+    parachute: score("parachute"),
+    repo: Math.max(...langs.map((l) => score(`repolang:${l}`))),
+    prom: Math.max(...PROM_TIERS.map((tt) => score(`prom:${tt}`))),
+    npm: Math.max(...NPM_TOPICS.map((tt) => score(`npm:${tt}`))),
+  };
+}
+function pickSource() {
+  const s = sourceScores();
+  const entries = Object.entries(s).map(([k, v]) => [k, Math.max(EXPLORE_FLOOR, v)]);
+  const total = entries.reduce((a, [, v]) => a + v, 0);
+  let r = Math.random() * total;
+  for (const [k, v] of entries) { r -= v; if (r <= 0) return k; }
+  return entries[0][0];
+}
+function topSource() {
+  return Object.entries(sourceScores()).sort((a, b) => b[1] - a[1])[0][0];
+}
+
+async function tick() {
   if (!pool.length || Date.now() - poolAt > POOL_TTL || bi >= batch.length) await refreshPool();
-  if (t % 4 === 0) {
-    // Parachute — highest-yield, email+LinkedIn already in the data.
-    const rows = await paraPage();
+  const type = pickSource(); // auto-double-down: more ticks go to the winner
+
+  if (type === "parachute") {
+    // Bigger pages when Parachute is the runaway winner (double-down on depth too).
+    const size = topSource() === "parachute" ? 90 : 60;
+    const rows = await paraPage(size);
     buffer.push(...rows); bumpYield("parachute", rows.length);
     return `parachute +${rows.length}`;
-  } else if (t % 12 === 5) {
+  }
+  if (type === "prom") {
     const q = pickAdaptive(PROM_TIERS, "prom:");
     const rows = await mineProminent(q, 8);
     buffer.push(...rows); bumpYield(`prom:${q}`, rows.length);
     return `prominent[${q}] +${rows.length}`;
-  } else if (t % 12 === 9) {
+  }
+  if (type === "npm") {
     const q = pickAdaptive(NPM_TOPICS, "npm:");
     const rows = await mineNpm(q, 10);
     buffer.push(...rows); bumpYield(`npm:${q}`, rows.length);
     return `npm[${q}] +${rows.length}`;
   }
-  // Default: mine one repo (adaptive language-weighted), dig deeper if it's hot.
+  // repo: mine one, then keep digging deeper WHILE it stays hot (auto-double-down).
   const repo = batch[bi++];
   if (!repo) return "idle";
-  const rows = await mineRepo(repo.name);
-  buffer.push(...rows); bumpYield(`repolang:${repo.lang}`, rows.length);
-  if (rows.length >= 3) {
-    const more = await mineRepo(repo.name, 2);
-    buffer.push(...more); bumpYield(`repolang:${repo.lang}`, more.length);
-    return `${repo.name} +${rows.length}+${more.length}`;
+  let page = 1, got = await mineRepo(repo.name, page);
+  buffer.push(...got); bumpYield(`repolang:${repo.lang}`, got.length);
+  let extra = 0;
+  while (got.length >= 3 && page < 4) { // very hot repos get pages 2, 3, 4
+    page++;
+    got = await mineRepo(repo.name, page);
+    buffer.push(...got); bumpYield(`repolang:${repo.lang}`, got.length);
+    extra += got.length;
   }
-  return `${repo.name} +${rows.length}`;
+  return extra ? `${repo.name} +${got.length + extra} (deep x${page})` : `${repo.name} +${got.length}`;
 }
 
 (async () => {
@@ -140,7 +174,13 @@ async function tick(t) {
   while (Date.now() - START < BUDGET_MS) {
     const t0 = Date.now();
     try {
-      const what = await tick(t);
+      // Re-pull fresh yields every ~5 min so auto-double-down tracks what's working NOW.
+      if (t > 0 && t % 15 === 0) {
+        await loadStats();
+        const s = sourceScores();
+        console.log(`re-weight: ${Object.entries(s).map(([k, v]) => `${k}=${v.toFixed(1)}`).join(" ")}`);
+      }
+      const what = await tick();
       // Time-flush every ~2 min even if the buffer is small, so nothing lingers.
       const stored = await flush(t % 6 === 0);
       totalStored += stored;
