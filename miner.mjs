@@ -126,6 +126,18 @@ function validEmail(e) {
   if (/noreply|no-reply|users\.noreply\.github\.com|githubusercontent|@github\.com$|example\.com|\.local$/.test(e)) return null;
   return e;
 }
+// Name = compulsion is email+LinkedIn; the name is DERIVED. Prefer the source's
+// name; if it isn't a full name, recover it from the LinkedIn slug (john-smith-3b ->
+// John Smith). Returns {first,last}; first is only empty if truly nothing is parseable.
+function nameParts(rawName, linkedinUrl) {
+  let parts = String(rawName || "").trim().split(/\s+/).filter(Boolean);
+  if (parts.length < 2) {
+    const slug = (String(linkedinUrl || "").match(/\/in\/([^/?#]+)/i)?.[1] || "")
+      .replace(/\d+$/, "").split(/[-_]/).filter((t) => t && !/^\d+$/.test(t) && t.length > 1);
+    if (slug.length >= 2) parts = slug.map((t) => t[0].toUpperCase() + t.slice(1));
+  }
+  return { first: parts[0] || "", last: parts.slice(1).join(" ") };
+}
 
 // Proactively pause when a budget is nearly gone, so the workers self-pace to ONE
 // token's sustainable rate and keep producing steadily instead of bursting into
@@ -231,11 +243,10 @@ async function resolveLogins(logins) {
       let email = validEmail(p.email);
       if (!email) email = await commitEmail(login);
       if (!email) continue;
-      const name = String(p.name || "").trim();
-      const parts = name.split(/\s+/).filter(Boolean);
-      if (parts.length < 2) continue;
+      const { first, last } = nameParts(p.name, li); // name derived from LinkedIn if needed
+      if (!first) continue;
       rows.push({
-        "First name": parts[0], "Last name": parts.slice(1).join(" "),
+        "First name": first, "Last name": last,
         Email: email, LinkedIn: li, Location: p.location || "",
         Role: "software_engineer", Source: "contributors",
       });
@@ -301,12 +312,11 @@ async function mineRepo(repo, page = 1) {
       const li = findLinkedin(socialText(p));
       if (!li) continue; // LinkedIn required — same gate as before
       const email = validEmail(p.email) || a.email;
-      const name = String(p.name || a.name || "").trim();
-      const parts = name.split(/\s+/).filter(Boolean);
-      if (parts.length < 2) continue; // need a real full name (avoids handles)
+      const { first, last } = nameParts(p.name || a.name, li); // derive from LinkedIn if needed
+      if (!first) continue;
       rows.push({
-        "First name": parts[0],
-        "Last name": parts.slice(1).join(" "),
+        "First name": first,
+        "Last name": last,
         Email: email,
         LinkedIn: li,
         Location: p.location || "",
@@ -347,11 +357,10 @@ async function leadFromLogin(login, fallbackEmail) {
   if (!li) return null;
   const email = validEmail(p.email) || validEmail(fallbackEmail) || await commitEmail(login);
   if (!email) return null;
-  const name = String(p.name || "").trim();
-  const parts = name.split(/\s+/).filter(Boolean);
-  if (parts.length < 2) return null;
+  const { first, last } = nameParts(p.name, li); // name derived from LinkedIn if needed
+  if (!first) return null;
   return {
-    "First name": parts[0], "Last name": parts.slice(1).join(" "),
+    "First name": first, "Last name": last,
     Email: email, LinkedIn: li, Location: p.location || "",
     Role: "software_engineer", Source: "contributors",
   };
