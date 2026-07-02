@@ -180,6 +180,67 @@ function socialText(p) {
 // so skipping a repeat costs zero leads and saves the API calls). Compounds over a run.
 const SEEN = new Set();
 
+// Batch-resolve a list of GitHub logins into COMPLETE leads: GraphQL profile
+// resolution (~40/call) → LinkedIn + email (public / commit-email) → same gate.
+// Skips already-seen logins. Shared by every login-based vector below.
+async function resolveLogins(logins) {
+  const fresh = [...new Set(logins.filter((lg) => lg && !SEEN.has(lg.toLowerCase())))];
+  const rows = [];
+  for (let i = 0; i < fresh.length; i += 40) {
+    const chunk = fresh.slice(i, i + 40);
+    const profs = await profilesBatch(chunk);
+    for (const login of chunk) {
+      SEEN.add(login.toLowerCase());
+      const p = profs[login.toLowerCase()];
+      if (!p) continue;
+      const li = findLinkedin(socialText(p));
+      if (!li) continue;
+      let email = validEmail(p.email);
+      if (!email) email = await commitEmail(login);
+      if (!email) continue;
+      const name = String(p.name || "").trim();
+      const parts = name.split(/\s+/).filter(Boolean);
+      if (parts.length < 2) continue;
+      rows.push({
+        "First name": parts[0], "Last name": parts.slice(1).join(" "),
+        Email: email, LinkedIn: li, Location: p.location || "",
+        Role: "software_engineer", Source: "contributors",
+      });
+    }
+  }
+  return rows;
+}
+
+// STARGAZERS — the vast untapped pool: developers who starred a popular repo.
+// One list call yields 100 logins; resolve them in ~3 GraphQL calls. Bottomless.
+async function mineStargazers(repo, page = 1) {
+  try {
+    const gz = await j(`https://api.github.com/repos/${repo}/stargazers?per_page=100&page=${page}`);
+    return resolveLogins((Array.isArray(gz) ? gz : []).map((u) => u.login));
+  } catch { return []; }
+}
+
+// SOCIAL GRAPH — traverse a seed dev's followers + following. Open-ended: every
+// resolved dev is a new seed, so coverage expands across the whole network over time.
+async function mineGraph(seed) {
+  try {
+    const [f1, f2] = await Promise.all([
+      j(`https://api.github.com/users/${seed}/followers?per_page=100`).catch(() => []),
+      j(`https://api.github.com/users/${seed}/following?per_page=100`).catch(() => []),
+    ]);
+    const logins = [...(Array.isArray(f1) ? f1 : []), ...(Array.isArray(f2) ? f2 : [])].map((u) => u.login);
+    return resolveLogins(logins);
+  } catch { return []; }
+}
+// Pick a well-connected seed login for graph traversal (top-followed dev for a query).
+async function graphSeed(q) {
+  try {
+    const res = await j(`https://api.github.com/search/users?q=${encodeURIComponent(q)}&sort=followers&order=desc&per_page=10`);
+    const items = (res.items || []).map((u) => u.login).filter((lg) => lg && !SEEN.has(lg.toLowerCase()));
+    return items[0] || null;
+  } catch { return null; }
+}
+
 async function mineRepo(repo, page = 1) {
   const rows = [];
   let commits;
@@ -269,33 +330,9 @@ async function mineProminent(q, limit = 100) {
   let logins = [];
   try {
     const res = await j(`https://api.github.com/search/users?q=${encodeURIComponent(q)}&sort=followers&order=desc&per_page=100`);
-    logins = (res.items || []).map((u) => u.login).filter(Boolean)
-      .filter((lg) => !SEEN.has(lg.toLowerCase())).slice(0, limit);
+    logins = (res.items || []).map((u) => u.login).filter(Boolean).slice(0, limit);
   } catch { return []; }
-  const rows = [];
-  for (let i = 0; i < logins.length; i += 40) {
-    const chunk = logins.slice(i, i + 40);
-    const profs = await profilesBatch(chunk); // 1 call per ~40 elite devs
-    for (const login of chunk) {
-      SEEN.add(login.toLowerCase());
-      const p = profs[login.toLowerCase()];
-      if (!p) continue;
-      const li = findLinkedin(socialText(p));
-      if (!li) continue;
-      let email = validEmail(p.email);
-      if (!email) email = await commitEmail(login); // elite talent worth the extra call
-      if (!email) continue;
-      const name = String(p.name || "").trim();
-      const parts = name.split(/\s+/).filter(Boolean);
-      if (parts.length < 2) continue;
-      rows.push({
-        "First name": parts[0], "Last name": parts.slice(1).join(" "),
-        Email: email, LinkedIn: li, Location: p.location || "",
-        Role: "software_engineer", Source: "contributors",
-      });
-    }
-  }
-  return rows;
+  return resolveLogins(logins);
 }
 
 // NPM AUTHORS: a Parachute-style email-in-data directory — the npm registry exposes
@@ -403,9 +440,9 @@ function buildBatch(pool, size) {
 }
 
 export {
-  AUTH, sleep, j, socials, mineRepo, commitEmail, leadFromLogin,
-  mineProminent, mineNpm, post, fetchTopRepos, buildBatch,
-  loadStats, reportStats, bumpYield, pickAdaptive, score,
+  AUTH, sleep, j, socials, mineRepo, commitEmail, leadFromLogin, resolveLogins,
+  mineProminent, mineNpm, mineStargazers, mineGraph, graphSeed, post,
+  fetchTopRepos, buildBatch, loadStats, reportStats, bumpYield, pickAdaptive, score,
   PROM_TIERS, NPM_TOPICS,
 };
 
@@ -437,6 +474,25 @@ async function runOnce() {
   const npmNew = await postAll(npm);
   stored += npmNew; mined += npm.length; bumpYield(`npm:${npmTopic}`, npmNew);
   console.log(`npm authors [${npmTopic}]: ${npm.length} mined, ${npmNew} fresh`);
+
+  // STARGAZERS — vast untapped pool. Rotate repo + page across runs (open-ended).
+  for (let k = 0; k < 3; k++) {
+    const repo = pool[(RUN * 3 + k) % pool.length];
+    const page = ((RUN + k) % 20) + 1;
+    const gz = await mineStargazers(repo.name, page);
+    const gzNew = await postAll(gz);
+    stored += gzNew; mined += gz.length; bumpYield("stargazers", gzNew);
+    console.log(`stargazers ${repo.name} p${page}: ${gz.length} mined, ${gzNew} fresh`);
+  }
+
+  // SOCIAL GRAPH — traverse a well-connected seed's network (open-ended expansion).
+  const seed = await graphSeed(pickAdaptive(PROM_TIERS, "prom:"));
+  if (seed) {
+    const g = await mineGraph(seed);
+    const gNew = await postAll(g);
+    stored += gNew; mined += g.length; bumpYield("graph", gNew);
+    console.log(`graph @${seed}: ${g.length} mined, ${gNew} fresh`);
+  }
 
   for (const repo of batch) {
     const rows = await mineRepo(repo.name);
