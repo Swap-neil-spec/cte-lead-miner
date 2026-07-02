@@ -127,6 +127,10 @@ async function refreshPool() {
 // The winner automatically earns a bigger share of the 20s heartbeats; when yields
 // shift, the mix shifts with them. Re-scored every ~5 min from fresh backend stats.
 const EXPLORE_FLOOR = 2;
+// Parachute-first: it has its own endpoint (no GitHub rate limit), so favor it
+// heavily while it still yields fresh leads. Once it mines out (yield -> ~0), the
+// multiplier stops mattering and GitHub sources take over automatically.
+const PRIORITY = { parachute: 4 };
 function sourceScores() {
   const langs = pool.length ? [...new Set(pool.map((r) => r.lang))] : ["seed"];
   return {
@@ -141,7 +145,7 @@ function sourceScores() {
 let starPage = 1; // advances so stargazer coverage keeps expanding open-endedly
 function pickSource() {
   const s = sourceScores();
-  const entries = Object.entries(s).map(([k, v]) => [k, Math.max(EXPLORE_FLOOR, v)]);
+  const entries = Object.entries(s).map(([k, v]) => [k, Math.max(EXPLORE_FLOOR, v * (PRIORITY[k] || 1))]);
   const total = entries.reduce((a, [, v]) => a + v, 0);
   let r = Math.random() * total;
   for (const [k, v] of entries) { r -= v; if (r <= 0) return k; }
@@ -156,11 +160,15 @@ async function tick() {
   const type = pickSource(); // auto-double-down: more ticks go to the winner
 
   if (type === "parachute") {
-    // Bigger pages when Parachute is the runaway winner (double-down on depth too).
-    const size = topSource() === "parachute" ? 90 : 60;
-    const rows = await paraPage(size);
-    stash("parachute", "parachute", rows);
-    return `parachute +${rows.length}`;
+    // Burn through the ~14k directory fast — several 90-profile pages per tick.
+    // No GitHub cost, so this grows the list while the GitHub token self-paces.
+    let got = 0;
+    for (let p = 0; p < 3; p++) {
+      const rows = await paraPage(90);
+      stash("parachute", "parachute", rows);
+      got += rows.length;
+    }
+    return `parachute +${got}`;
   }
   if (type === "prom") {
     const q = pickAdaptive(PROM_TIERS, "prom:");
