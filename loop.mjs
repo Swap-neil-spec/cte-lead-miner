@@ -13,6 +13,7 @@
 import {
   BASE, AUTH, sleep, post, mineRepo, mineProminent, mineNpm,
   mineStargazers, mineGraph, graphSeed, mineOrg, orgPool, mineGitlab,
+  minePyPI, mineCrates,
   fetchTopRepos, buildBatch, loadStats, reportStats, bumpYield,
   pickAdaptive, score, PROM_TIERS, NPM_TOPICS,
 } from "./miner.mjs";
@@ -63,9 +64,9 @@ async function paraPage(size = 60) {
 // auto-double-down abandon an exhausted source (e.g. Parachute after a full pass,
 // where every row is a dedup) and pour effort into sources still producing FRESH
 // leads — essential when the goal is 100k *new* records.
-const SOURCES = ["parachute", "repo", "prom", "npm", "stars", "graph", "orgs", "gitlab"];
-const buffers = { parachute: [], repo: [], prom: [], npm: [], stars: [], graph: [], orgs: [], gitlab: [] };
-const pending = { parachute: {}, repo: {}, prom: {}, npm: {}, stars: {}, graph: {}, orgs: {}, gitlab: {} }; // sliceKey -> gross since last flush
+const SOURCES = ["parachute", "repo", "prom", "npm", "stars", "graph", "orgs", "gitlab", "registries"];
+const buffers = { parachute: [], repo: [], prom: [], npm: [], stars: [], graph: [], orgs: [], gitlab: [], registries: [] };
+const pending = { parachute: {}, repo: {}, prom: {}, npm: {}, stars: {}, graph: {}, orgs: {}, gitlab: {}, registries: {} }; // sliceKey -> gross since last flush
 const FLUSH_AT = 40;
 let totalBuffered = () => SOURCES.reduce((a, s) => a + buffers[s].length, 0);
 function stash(source, sliceKey, rows) {
@@ -142,9 +143,10 @@ function sourceScores() {
     graph: score("graph"),
     orgs: score("orgs"),
     gitlab: score("gitlab"),
+    registries: Math.max(score("pypi"), score("crates")),
   };
 }
-let starPage = 1, orgPage = 1, glPage = 1; // advance so coverage keeps expanding open-endedly
+let starPage = 1, orgPage = 1, glPage = 1, regPage = 1; // advance so coverage keeps expanding open-endedly
 function pickSource() {
   const s = sourceScores();
   const entries = Object.entries(s).map(([k, v]) => [k, Math.max(EXPLORE_FLOOR, v * (PRIORITY[k] || 1))]);
@@ -211,6 +213,18 @@ async function tick() {
     const rows = await mineGitlab(page);
     stash("gitlab", "gitlab", rows);
     return `gitlab p${page} +${rows.length}`;
+  }
+  if (type === "registries") {
+    // Alternate PyPI / crates.io — net-new author populations on their own budgets.
+    const p = regPage++;
+    if (p % 2 === 0) {
+      const rows = await minePyPI((Math.floor(p / 2) % 300) + 1);
+      stash("registries", "pypi", rows);
+      return `pypi +${rows.length}`;
+    }
+    const rows = await mineCrates((Math.floor(p / 2) % 40) + 1);
+    stash("registries", "crates", rows);
+    return `crates +${rows.length}`;
   }
   // repo: mine one, then keep digging deeper WHILE it stays hot (auto-double-down).
   const repo = batch[bi++];

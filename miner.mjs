@@ -332,6 +332,76 @@ function gitlabLinkedin(full) {
   }
   return findLinkedin(`${full.website_url || ""} ${full.bio || ""}`);
 }
+// --- Package registries: PyPI (Python) + crates.io (Rust) reach NET-NEW author
+// populations on their OWN discovery budgets; PyPI's author_email is a real email
+// fallback. LinkedIn resolves via each package's GitHub owner (shared, GraphQL). ---
+function ghOwnerFromUrls(urls) {
+  for (const u of urls) {
+    const m = String(u || "").match(/github\.com[/:]([A-Za-z0-9\-_.]+)\/[A-Za-z0-9\-_.]+/i);
+    if (m && m[1] && !/^(sponsors|orgs|features|about)$/i.test(m[1])) return m[1];
+  }
+  return null;
+}
+function unwrapEmail(s) {
+  const raw = String(s || "");
+  return validEmail(raw.match(/<([^>]+)>/)?.[1] || raw.match(/[a-z0-9._%+\-]+@[a-z0-9.\-]+\.[a-z]{2,}/i)?.[0] || raw);
+}
+const PYPI_SEED = ["httpx", "rich", "pydantic", "fastapi", "flask", "requests", "click",
+  "poetry", "black", "ruff", "mypy", "pytest", "sqlalchemy", "typer", "uvicorn",
+  "starlette", "aiohttp", "loguru", "tqdm", "pandas", "numpy", "polars", "duckdb",
+  "pyright", "hatch", "pdm", "pillow", "beautifulsoup4", "scrapy", "celery"];
+let PYPI_TOP = null;
+async function pypiTop() {
+  if (PYPI_TOP) return PYPI_TOP;
+  try {
+    const r = await fetch("https://hugovk.github.io/top-pypi-packages/top-pypi-packages-30-days.min.json");
+    const rows = ((await r.json()).rows || []).map((x) => x.project).filter(Boolean);
+    PYPI_TOP = rows.length ? rows : PYPI_SEED;
+  } catch { PYPI_TOP = PYPI_SEED; }
+  return PYPI_TOP;
+}
+async function minePyPI(page = 1) {
+  const top = await pypiTop();
+  if (!top.length) return [];
+  const size = 40, start = ((page - 1) * size) % top.length;
+  const slice = top.slice(start, start + size);
+  const rows = [];
+  const seenOwner = new Set();
+  for (const pkg of slice) {
+    try {
+      const r = await fetch(`https://pypi.org/pypi/${encodeURIComponent(pkg)}/json`);
+      if (!r.ok) continue;
+      const info = (await r.json()).info || {};
+      const owner = ghOwnerFromUrls([info.home_page, ...Object.values(info.project_urls || {})]);
+      if (!owner || seenOwner.has(owner.toLowerCase())) continue;
+      seenOwner.add(owner.toLowerCase());
+      const row = await leadFromLogin(owner, unwrapEmail(info.author_email) || unwrapEmail(info.maintainer_email));
+      if (row) { row.Source = "contributors"; rows.push(row); }
+    } catch {}
+  }
+  return rows;
+}
+async function mineCrates(page = 1) {
+  const ua = { "User-Agent": "cte-lead-miner (talent sourcing)" };
+  let crates = [];
+  try {
+    const r = await fetch(`https://crates.io/api/v1/crates?sort=downloads&per_page=50&page=${page}`, { headers: ua });
+    crates = ((await r.json()).crates || []);
+  } catch { return []; }
+  const logins = [], seenOwner = new Set();
+  for (const c of crates) {
+    try {
+      const r = await fetch(`https://crates.io/api/v1/crates/${c.id}/owners`, { headers: ua });
+      for (const o of (((await r.json()).users) || [])) {
+        const lg = o.login;
+        if (lg && !lg.includes(":") && !seenOwner.has(lg.toLowerCase())) { seenOwner.add(lg.toLowerCase()); logins.push(lg); }
+      }
+      await sleep(120); // crates.io asks for gentle pacing
+    } catch {}
+  }
+  return resolveLogins(logins);
+}
+
 async function mineGitlab(page = 1) {
   const users = await glJson(`https://gitlab.com/api/v4/users?per_page=100&page=${page}&active=true&without_project_bots=true`);
   if (!Array.isArray(users)) return [];
@@ -553,7 +623,7 @@ function buildBatch(pool, size) {
 export {
   AUTH, sleep, j, socials, mineRepo, commitEmail, leadFromLogin, resolveLogins,
   mineProminent, mineNpm, mineStargazers, mineGraph, graphSeed,
-  mineOrg, orgPool, ORGS, mineGitlab, post,
+  mineOrg, orgPool, ORGS, mineGitlab, minePyPI, mineCrates, post,
   fetchTopRepos, buildBatch, loadStats, reportStats, bumpYield, pickAdaptive, score,
   PROM_TIERS, NPM_TOPICS,
 };
@@ -624,6 +694,16 @@ async function runOnce() {
     stored += glNew; mined += gl.length; bumpYield("gitlab", glNew);
     console.log(`gitlab p${(RUN * 5 + k) % 200 + 1}: ${gl.length} mined, ${glNew} fresh`);
   }
+
+  // PACKAGE REGISTRIES — net-new author populations (Python/Rust) on own budgets.
+  const py = await minePyPI((RUN % 300) + 1);
+  const pyNew = await postAll(py);
+  stored += pyNew; mined += py.length; bumpYield("pypi", pyNew);
+  console.log(`pypi: ${py.length} mined, ${pyNew} fresh`);
+  const cr = await mineCrates((RUN % 40) + 1);
+  const crNew = await postAll(cr);
+  stored += crNew; mined += cr.length; bumpYield("crates", crNew);
+  console.log(`crates: ${cr.length} mined, ${crNew} fresh`);
 
   for (const repo of batch) {
     const rows = await mineRepo(repo.name);
