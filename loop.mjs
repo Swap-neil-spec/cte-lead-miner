@@ -13,7 +13,7 @@
 import {
   BASE, AUTH, sleep, post, mineRepo, mineProminent, mineNpm,
   mineStargazers, mineGraph, graphSeed, mineOrg, orgPool,
-  minePyPI, mineCrates, mineHF,
+  minePyPI, mineCrates, mineHF, AI_TOPICS, aiForkedRepos, mineForks,
   fetchTopRepos, buildBatch, loadStats, reportStats, bumpYield,
   pickAdaptive, score, PROM_TIERS, NPM_TOPICS,
 } from "./miner.mjs";
@@ -66,9 +66,9 @@ async function paraPage(size = 60) {
 // leads — essential when the goal is 100k *new* records.
 // NOTE: GitLab dropped — probed non-viable (public_email/linkedin private by default,
 // user-list auth-gated), so it yields ~0. Registries (PyPI/crates) kept.
-const SOURCES = ["parachute", "repo", "prom", "npm", "stars", "graph", "orgs", "registries"];
-const buffers = { parachute: [], repo: [], prom: [], npm: [], stars: [], graph: [], orgs: [], registries: [] };
-const pending = { parachute: {}, repo: {}, prom: {}, npm: {}, stars: {}, graph: {}, orgs: {}, registries: {} }; // sliceKey -> gross since last flush
+const SOURCES = ["ai", "parachute", "repo", "prom", "npm", "stars", "graph", "orgs", "registries"];
+const buffers = { ai: [], parachute: [], repo: [], prom: [], npm: [], stars: [], graph: [], orgs: [], registries: [] };
+const pending = { ai: {}, parachute: {}, repo: {}, prom: {}, npm: {}, stars: {}, graph: {}, orgs: {}, registries: {} }; // sliceKey -> gross since last flush
 const FLUSH_AT = 40;
 let totalBuffered = () => SOURCES.reduce((a, s) => a + buffers[s].length, 0);
 function stash(source, sliceKey, rows) {
@@ -116,12 +116,17 @@ const TICK_MS = 20000;               // 20-second discovery heartbeat
 const POOL_TTL = 25 * 60 * 1000;     // refresh repo pool every 25 min
 
 let pool = [], batch = [], bi = 0, poolAt = 0;
+let aiRepos = [], aiIdx = 0, aiTopicIdx = 0;
 async function refreshPool() {
   await loadStats();
   pool = await fetchTopRepos();
   batch = buildBatch(pool, 240); // a long rolling batch to iterate one-per-tick
+  // AI focus: most-forked repos for a rotating AI topic (accumulate across refreshes).
+  const topic = AI_TOPICS[aiTopicIdx++ % AI_TOPICS.length];
+  const fresh = await aiForkedRepos(topic, (aiTopicIdx % 3) + 1);
+  aiRepos = [...new Set([...fresh, ...aiRepos])].slice(0, 400);
   bi = 0; poolAt = Date.now();
-  console.log(`pool refreshed: ${pool.length} repos, rolling batch ${batch.length}`);
+  console.log(`pool refreshed: ${pool.length} repos; ai[${topic}]: ${aiRepos.length} most-forked`);
 }
 
 // --- AUTO-DOUBLE-DOWN ---------------------------------------------------------
@@ -130,13 +135,13 @@ async function refreshPool() {
 // The winner automatically earns a bigger share of the 20s heartbeats; when yields
 // shift, the mix shifts with them. Re-scored every ~5 min from fresh backend stats.
 const EXPLORE_FLOOR = 2;
-// Parachute (13,989 profiles) is now fully mined, so no priority — the adaptive
-// freshness-weighting keeps it at floor share to catch any new additions, and the
-// GitHub vectors that still find fresh LinkedIn-having devs get the real effort.
-const PRIORITY = {};
+// FOCUS: most-forked AI projects (Neil's directive) get a priority boost while they
+// yield fresh leads; the adaptive weighting still self-corrects if they dry up.
+const PRIORITY = { ai: 3 };
 function sourceScores() {
   const langs = pool.length ? [...new Set(pool.map((r) => r.lang))] : ["seed"];
   return {
+    ai: score("ai"),
     parachute: score("parachute"),
     repo: Math.max(...langs.map((l) => score(`repolang:${l}`))),
     prom: Math.max(...PROM_TIERS.map((tt) => score(`prom:${tt}`))),
@@ -163,6 +168,28 @@ function topSource() {
 async function tick() {
   if (!pool.length || Date.now() - poolAt > POOL_TTL || bi >= batch.length) await refreshPool();
   const type = pickSource(); // auto-double-down: more ticks go to the winner
+
+  if (type === "ai") {
+    // FOCUS: most-forked AI projects — alternate contributors (deep) and forkers.
+    if (!aiRepos.length) return "idle";
+    const repo = aiRepos[aiIdx % aiRepos.length];
+    aiIdx++;
+    if (aiIdx % 2 === 0) {
+      let got = await mineRepo(repo, 1);
+      stash("ai", "ai", got);
+      let page = 1, last = got.length, extra = 0;
+      while (last >= 3 && page < 5) { // dig deep while productive
+        page++;
+        const more = await mineRepo(repo, page);
+        stash("ai", "ai", more); extra += more.length; last = more.length;
+      }
+      return `ai-contrib ${repo} +${got.length + extra}`;
+    }
+    const forkPage = (Math.floor(aiIdx / 2) % 12) + 1;
+    const rows = await mineForks(repo, forkPage);
+    stash("ai", "ai", rows);
+    return `ai-forks ${repo} +${rows.length}`;
+  }
 
   if (type === "parachute") {
     // Directory is fully mined — a single light page catches any new additions.

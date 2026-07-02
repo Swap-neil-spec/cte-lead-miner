@@ -428,6 +428,27 @@ async function mineHF(page = 1) {
   return resolveLogins(logins); // GitHub gives LinkedIn + email
 }
 
+// --- FOCUS: most-forked AI projects. Contributors AND forkers of these repos are
+// AI/ML engineers. Mine both for maximum yield (Neil's directive). ---------------
+const AI_TOPICS = ["machine-learning", "deep-learning", "llm", "large-language-models",
+  "nlp", "computer-vision", "artificial-intelligence", "neural-network", "transformers",
+  "generative-ai", "diffusion-models", "reinforcement-learning", "pytorch", "tensorflow",
+  "rag", "ai-agents", "mlops", "data-science", "gpt", "stable-diffusion", "langchain",
+  "chatbot", "image-generation", "speech-recognition", "recommender-system"];
+async function aiForkedRepos(topic, page = 1) {
+  try {
+    const res = await j(`https://api.github.com/search/repositories?q=topic:${encodeURIComponent(topic)}&sort=forks&order=desc&per_page=100&page=${page}`);
+    return (res.items || []).map((r) => r.full_name).filter((n) => n && !REPO_SKIP.test(n));
+  } catch { return []; }
+}
+// Forkers = engaged devs who cloned the project into their own account.
+async function mineForks(repo, page = 1) {
+  try {
+    const forks = await j(`https://api.github.com/repos/${repo}/forks?sort=newest&per_page=100&page=${page}`);
+    return resolveLogins((Array.isArray(forks) ? forks : []).map((f) => f.owner?.login).filter(Boolean));
+  } catch { return []; }
+}
+
 async function mineGitlab(page = 1) {
   const users = await glJson(`https://gitlab.com/api/v4/users?per_page=100&page=${page}&active=true&without_project_bots=true`);
   if (!Array.isArray(users)) return [];
@@ -649,7 +670,8 @@ function buildBatch(pool, size) {
 export {
   AUTH, sleep, j, socials, mineRepo, commitEmail, leadFromLogin, resolveLogins,
   mineProminent, mineNpm, mineStargazers, mineGraph, graphSeed,
-  mineOrg, orgPool, ORGS, minePyPI, mineCrates, mineHF, post,
+  mineOrg, orgPool, ORGS, minePyPI, mineCrates, mineHF,
+  AI_TOPICS, aiForkedRepos, mineForks, post,
   fetchTopRepos, buildBatch, loadStats, reportStats, bumpYield, pickAdaptive, score,
   PROM_TIERS, NPM_TOPICS,
 };
@@ -728,6 +750,22 @@ async function runOnce() {
   const hfNew = await postAll(hf);
   stored += hfNew; mined += hf.length; bumpYield("hf", hfNew);
   console.log(`huggingface: ${hf.length} mined, ${hfNew} fresh`);
+
+  // AI FOCUS — most-forked AI projects: mine BOTH contributors and forkers (Neil's directive).
+  const aiTopic = AI_TOPICS[RUN % AI_TOPICS.length];
+  const aiRepos = await aiForkedRepos(aiTopic, (RUN % 3) + 1);
+  console.log(`ai focus [${aiTopic}]: ${aiRepos.length} most-forked repos`);
+  for (const repo of aiRepos.slice(0, 10)) {
+    let cNew = 0, cMined = 0, page = 1, last = 3;
+    while (last >= 3 && page <= 5) { // contributors, deep while productive
+      const c = await mineRepo(repo, page);
+      cNew += await postAll(c); cMined += c.length; last = c.length; page++;
+    }
+    const f = await mineForks(repo, (RUN % 6) + 1); // forkers
+    const fNew = await postAll(f);
+    stored += cNew + fNew; mined += cMined + f.length; bumpYield("ai", cNew + fNew);
+    console.log(`  ai ${repo}: ${cNew} contrib + ${fNew} forkers fresh`);
+  }
 
   for (const repo of batch) {
     const rows = await mineRepo(repo.name);
