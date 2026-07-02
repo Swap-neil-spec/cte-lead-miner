@@ -687,14 +687,6 @@ async function runOnce() {
     console.log(`org ${org} p${page}: ${om.length} mined, ${omNew} fresh`);
   }
 
-  // GITLAB — parallel budget (own 500/min limit), email+LinkedIn in the profile data.
-  for (let k = 0; k < 5; k++) {
-    const gl = await mineGitlab((RUN * 5 + k) % 200 + 1);
-    const glNew = await postAll(gl);
-    stored += glNew; mined += gl.length; bumpYield("gitlab", glNew);
-    console.log(`gitlab p${(RUN * 5 + k) % 200 + 1}: ${gl.length} mined, ${glNew} fresh`);
-  }
-
   // PACKAGE REGISTRIES — net-new author populations (Python/Rust) on own budgets.
   const py = await minePyPI((RUN % 300) + 1);
   const pyNew = await postAll(py);
