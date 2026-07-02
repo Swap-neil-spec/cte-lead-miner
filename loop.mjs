@@ -127,10 +127,10 @@ async function refreshPool() {
 // The winner automatically earns a bigger share of the 20s heartbeats; when yields
 // shift, the mix shifts with them. Re-scored every ~5 min from fresh backend stats.
 const EXPLORE_FLOOR = 2;
-// Parachute-first: it has its own endpoint (no GitHub rate limit), so favor it
-// heavily while it still yields fresh leads. Once it mines out (yield -> ~0), the
-// multiplier stops mattering and GitHub sources take over automatically.
-const PRIORITY = { parachute: 4 };
+// Parachute (13,989 profiles) is now fully mined, so no priority — the adaptive
+// freshness-weighting keeps it at floor share to catch any new additions, and the
+// GitHub vectors that still find fresh LinkedIn-having devs get the real effort.
+const PRIORITY = {};
 function sourceScores() {
   const langs = pool.length ? [...new Set(pool.map((r) => r.lang))] : ["seed"];
   return {
@@ -160,15 +160,10 @@ async function tick() {
   const type = pickSource(); // auto-double-down: more ticks go to the winner
 
   if (type === "parachute") {
-    // Burn through the ~14k directory fast — several 90-profile pages per tick.
-    // No GitHub cost, so this grows the list while the GitHub token self-paces.
-    let got = 0;
-    for (let p = 0; p < 3; p++) {
-      const rows = await paraPage(90);
-      stash("parachute", "parachute", rows);
-      got += rows.length;
-    }
-    return `parachute +${got}`;
+    // Directory is fully mined — a single light page catches any new additions.
+    const rows = await paraPage(60);
+    stash("parachute", "parachute", rows);
+    return `parachute +${rows.length}`;
   }
   if (type === "prom") {
     const q = pickAdaptive(PROM_TIERS, "prom:");
