@@ -285,6 +285,34 @@ async function graphSeed(q) {
   } catch { return null; }
 }
 
+// COMPANY ORGS — public members of tech-company GitHub orgs are working professionals
+// with the HIGHEST public-LinkedIn density of any GitHub population. Seed list plus
+// self-expansion: every repo we mine is "owner/repo", and the owner is usually an org,
+// so orgPool() keeps discovering fresh orgs open-endedly.
+const ORGS = [
+  "vercel", "stripe", "shopify", "gitlab", "hashicorp", "airbnb", "netflix", "uber",
+  "spotify", "atlassian", "twilio", "cloudflare", "digitalocean", "elastic", "mongodb",
+  "confluentinc", "databricks", "grafana", "huggingface", "openai", "cockroachdb",
+  "supabase", "prisma", "vercel-labs", "withastro", "remix-run", "nextauthjs", "nrwl",
+  "expo", "reactjs", "vuejs", "angular", "sveltejs", "denoland", "nodejs", "rust-lang",
+  "golang", "python", "pytorch", "tensorflow", "kubernetes", "docker", "hashicorp",
+  "apache", "grpc", "envoyproxy", "cilium", "temporalio", "dagster-io", "dbt-labs",
+  "getsentry", "posthog", "calcom", "medusajs", "novuhq", "appwrite", "strapi",
+  "nestjs", "fastify", "trpc", "tanstack", "pmndrs", "chakra-ui", "mui", "ant-design",
+  "storybookjs", "vitejs", "rollup", "esbuild", "biomejs", "astral-sh", "pydantic",
+  "encode", "tiangolo", "streamlit", "gradio-app", "langchain-ai", "run-llama",
+];
+function orgPool(repos) {
+  const owners = (repos || []).map((r) => String(r.name || r).split("/")[0]).filter(Boolean);
+  return [...new Set([...ORGS, ...owners])];
+}
+async function mineOrg(org, page = 1) {
+  try {
+    const m = await j(`https://api.github.com/orgs/${org}/public_members?per_page=100&page=${page}`);
+    return resolveLogins((Array.isArray(m) ? m : []).map((u) => u.login));
+  } catch { return []; }
+}
+
 async function mineRepo(repo, page = 1) {
   const rows = [];
   let commits;
@@ -483,7 +511,8 @@ function buildBatch(pool, size) {
 
 export {
   AUTH, sleep, j, socials, mineRepo, commitEmail, leadFromLogin, resolveLogins,
-  mineProminent, mineNpm, mineStargazers, mineGraph, graphSeed, post,
+  mineProminent, mineNpm, mineStargazers, mineGraph, graphSeed,
+  mineOrg, orgPool, ORGS, post,
   fetchTopRepos, buildBatch, loadStats, reportStats, bumpYield, pickAdaptive, score,
   PROM_TIERS, NPM_TOPICS,
 };
@@ -536,13 +565,24 @@ async function runOnce() {
     console.log(`graph @${seed}: ${g.length} mined, ${gNew} fresh`);
   }
 
+  // COMPANY ORGS — highest public-LinkedIn density (working professionals at top firms).
+  const orgs = orgPool(pool);
+  for (let k = 0; k < 4; k++) {
+    const org = orgs[(RUN * 4 + k) % orgs.length];
+    const page = ((RUN + k) % 5) + 1;
+    const om = await mineOrg(org, page);
+    const omNew = await postAll(om);
+    stored += omNew; mined += om.length; bumpYield("orgs", omNew);
+    console.log(`org ${org} p${page}: ${om.length} mined, ${omNew} fresh`);
+  }
+
   for (const repo of batch) {
     const rows = await mineRepo(repo.name);
     let sNew = await postAll(rows);
     mined += rows.length;
     // Winner-following: keep digging deeper WHILE the repo stays hot (fresh-yield).
     let page = 1, last = rows.length;
-    while (last >= 3 && page < 4) {
+    while (last >= 3 && page < 6) {
       page++;
       const more = await mineRepo(repo.name, page);
       sNew += await postAll(more);

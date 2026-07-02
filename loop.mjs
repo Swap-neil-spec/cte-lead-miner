@@ -12,7 +12,7 @@
 
 import {
   BASE, AUTH, sleep, post, mineRepo, mineProminent, mineNpm,
-  mineStargazers, mineGraph, graphSeed,
+  mineStargazers, mineGraph, graphSeed, mineOrg, orgPool,
   fetchTopRepos, buildBatch, loadStats, reportStats, bumpYield,
   pickAdaptive, score, PROM_TIERS, NPM_TOPICS,
 } from "./miner.mjs";
@@ -63,9 +63,9 @@ async function paraPage(size = 60) {
 // auto-double-down abandon an exhausted source (e.g. Parachute after a full pass,
 // where every row is a dedup) and pour effort into sources still producing FRESH
 // leads — essential when the goal is 100k *new* records.
-const SOURCES = ["parachute", "repo", "prom", "npm", "stars", "graph"];
-const buffers = { parachute: [], repo: [], prom: [], npm: [], stars: [], graph: [] };
-const pending = { parachute: {}, repo: {}, prom: {}, npm: {}, stars: {}, graph: {} }; // sliceKey -> gross since last flush
+const SOURCES = ["parachute", "repo", "prom", "npm", "stars", "graph", "orgs"];
+const buffers = { parachute: [], repo: [], prom: [], npm: [], stars: [], graph: [], orgs: [] };
+const pending = { parachute: {}, repo: {}, prom: {}, npm: {}, stars: {}, graph: {}, orgs: {} }; // sliceKey -> gross since last flush
 const FLUSH_AT = 40;
 let totalBuffered = () => SOURCES.reduce((a, s) => a + buffers[s].length, 0);
 function stash(source, sliceKey, rows) {
@@ -140,9 +140,10 @@ function sourceScores() {
     npm: Math.max(...NPM_TOPICS.map((tt) => score(`npm:${tt}`))),
     stars: score("stargazers"),
     graph: score("graph"),
+    orgs: score("orgs"),
   };
 }
-let starPage = 1; // advances so stargazer coverage keeps expanding open-endedly
+let starPage = 1, orgPage = 1; // advance so coverage keeps expanding open-endedly
 function pickSource() {
   const s = sourceScores();
   const entries = Object.entries(s).map(([k, v]) => [k, Math.max(EXPLORE_FLOOR, v * (PRIORITY[k] || 1))]);
@@ -193,6 +194,15 @@ async function tick() {
     const rows = await mineGraph(seed);
     stash("graph", "graph", rows);
     return `graph @${seed} +${rows.length}`;
+  }
+  if (type === "orgs") {
+    // Company org members — highest public-LinkedIn density (top-firm professionals).
+    const orgs = orgPool(pool);
+    const org = orgs[(orgPage) % orgs.length];
+    const page = (Math.floor(orgPage++ / orgs.length) % 5) + 1;
+    const rows = await mineOrg(org, page);
+    stash("orgs", "orgs", rows);
+    return `org ${org} p${page} +${rows.length}`;
   }
   // repo: mine one, then keep digging deeper WHILE it stays hot (auto-double-down).
   const repo = batch[bi++];
