@@ -402,6 +402,32 @@ async function mineCrates(page = 1) {
   return resolveLogins(logins);
 }
 
+// --- HuggingFace: AI/ML talent. The API has no contact fields, but the profile
+// HTML carries github/linkedin links. Discover model authors -> read their profile
+// HTML -> GitHub username -> resolve (LinkedIn+email). Targets a high-value niche. ---
+const HF_UA = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122 Safari/537.36";
+async function mineHF(page = 1) {
+  let models = [];
+  try {
+    const r = await fetch(`https://huggingface.co/api/models?sort=likes&limit=100&skip=${(page - 1) * 100}`);
+    models = await r.json();
+  } catch { return []; }
+  const authors = [...new Set((Array.isArray(models) ? models : [])
+    .map((m) => String(m.id || "").split("/")[0]).filter(Boolean))];
+  const logins = [];
+  for (const a of authors) {
+    if (SEEN.has("hf:" + a.toLowerCase())) continue;
+    SEEN.add("hf:" + a.toLowerCase());
+    try {
+      const html = await (await fetch(`https://huggingface.co/${encodeURIComponent(a)}`, { headers: { "User-Agent": HF_UA } })).text();
+      const gh = html.match(/github\.com\/([A-Za-z0-9\-]{2,39})(?=["'\/\s])/i)?.[1];
+      if (gh && !/^(huggingface|orgs|features|about|sponsors|topics|marketplace)$/i.test(gh)) logins.push(gh);
+    } catch {}
+    await sleep(80);
+  }
+  return resolveLogins(logins); // GitHub gives LinkedIn + email
+}
+
 async function mineGitlab(page = 1) {
   const users = await glJson(`https://gitlab.com/api/v4/users?per_page=100&page=${page}&active=true&without_project_bots=true`);
   if (!Array.isArray(users)) return [];
@@ -623,7 +649,7 @@ function buildBatch(pool, size) {
 export {
   AUTH, sleep, j, socials, mineRepo, commitEmail, leadFromLogin, resolveLogins,
   mineProminent, mineNpm, mineStargazers, mineGraph, graphSeed,
-  mineOrg, orgPool, ORGS, mineGitlab, minePyPI, mineCrates, post,
+  mineOrg, orgPool, ORGS, minePyPI, mineCrates, mineHF, post,
   fetchTopRepos, buildBatch, loadStats, reportStats, bumpYield, pickAdaptive, score,
   PROM_TIERS, NPM_TOPICS,
 };
@@ -696,6 +722,12 @@ async function runOnce() {
   const crNew = await postAll(cr);
   stored += crNew; mined += cr.length; bumpYield("crates", crNew);
   console.log(`crates: ${cr.length} mined, ${crNew} fresh`);
+
+  // HUGGINGFACE — AI/ML talent (profile HTML -> GitHub -> resolve).
+  const hf = await mineHF((RUN % 20) + 1);
+  const hfNew = await postAll(hf);
+  stored += hfNew; mined += hf.length; bumpYield("hf", hfNew);
+  console.log(`huggingface: ${hf.length} mined, ${hfNew} fresh`);
 
   for (const repo of batch) {
     const rows = await mineRepo(repo.name);
