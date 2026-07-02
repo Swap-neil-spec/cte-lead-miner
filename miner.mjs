@@ -313,6 +313,47 @@ async function mineOrg(org, page = 1) {
   } catch { return []; }
 }
 
+// --- GitLab: a PARALLEL dev ecosystem — separate 500/min rate limit (~30k/hr, does
+// NOT touch the GitHub token) AND email+LinkedIn in the profile data (public_email +
+// linkedin fields). Parachute-class supply, net-new devs, relieves the bottleneck.
+const GL = process.env.GITLAB_TOKEN;
+const glHeaders = GL ? { "PRIVATE-TOKEN": GL } : {};
+async function glJson(url) {
+  try { const r = await fetch(url, { headers: glHeaders }); return r.ok ? await r.json() : null; }
+  catch { return null; }
+}
+function gitlabLinkedin(full) {
+  const raw = String(full.linkedin || "").trim();
+  if (raw) {
+    const direct = findLinkedin(raw);
+    if (direct) return direct;
+    const slug = raw.replace(/\/+$/, "").split("/").pop();
+    if (/^[A-Za-z0-9\-_%]{3,}$/.test(slug)) return `https://www.linkedin.com/in/${slug}`;
+  }
+  return findLinkedin(`${full.website_url || ""} ${full.bio || ""}`);
+}
+async function mineGitlab(page = 1) {
+  const users = await glJson(`https://gitlab.com/api/v4/users?per_page=100&page=${page}&active=true&without_project_bots=true`);
+  if (!Array.isArray(users)) return [];
+  const rows = [];
+  for (const u of users) {
+    const email = validEmail(u.public_email);
+    if (!email || SEEN.has("gl:" + u.id)) continue; // public_email is in the list -> cheap filter
+    SEEN.add("gl:" + u.id);
+    const full = await glJson(`https://gitlab.com/api/v4/users/${u.id}`); // full profile has linkedin
+    if (!full) continue;
+    const li = gitlabLinkedin(full);
+    if (!li) continue;
+    const { first, last } = nameParts(full.name || u.name, li);
+    if (!first) continue;
+    rows.push({
+      "First name": first, "Last name": last, Email: email, LinkedIn: li,
+      Location: full.location || "", Role: "software_engineer", Source: "gitlab",
+    });
+  }
+  return rows;
+}
+
 async function mineRepo(repo, page = 1) {
   const rows = [];
   let commits;
@@ -512,7 +553,7 @@ function buildBatch(pool, size) {
 export {
   AUTH, sleep, j, socials, mineRepo, commitEmail, leadFromLogin, resolveLogins,
   mineProminent, mineNpm, mineStargazers, mineGraph, graphSeed,
-  mineOrg, orgPool, ORGS, post,
+  mineOrg, orgPool, ORGS, mineGitlab, post,
   fetchTopRepos, buildBatch, loadStats, reportStats, bumpYield, pickAdaptive, score,
   PROM_TIERS, NPM_TOPICS,
 };
@@ -574,6 +615,14 @@ async function runOnce() {
     const omNew = await postAll(om);
     stored += omNew; mined += om.length; bumpYield("orgs", omNew);
     console.log(`org ${org} p${page}: ${om.length} mined, ${omNew} fresh`);
+  }
+
+  // GITLAB — parallel budget (own 500/min limit), email+LinkedIn in the profile data.
+  for (let k = 0; k < 5; k++) {
+    const gl = await mineGitlab((RUN * 5 + k) % 200 + 1);
+    const glNew = await postAll(gl);
+    stored += glNew; mined += gl.length; bumpYield("gitlab", glNew);
+    console.log(`gitlab p${(RUN * 5 + k) % 200 + 1}: ${gl.length} mined, ${glNew} fresh`);
   }
 
   for (const repo of batch) {
