@@ -127,14 +127,27 @@ function validEmail(e) {
   return e;
 }
 
+// Proactively pause when a budget is nearly gone, so the workers self-pace to ONE
+// token's sustainable rate and keep producing steadily instead of bursting into
+// 403s and returning nothing. reset = seconds since epoch (header).
+async function paceOn(res) {
+  const rem = Number(res.headers.get("x-ratelimit-remaining"));
+  if (Number.isFinite(rem) && rem < 120) {
+    const reset = Number(res.headers.get("x-ratelimit-reset")) * 1000;
+    const wait = Math.min(3600000, Math.max(0, (reset || Date.now()) - Date.now() + 3000));
+    if (wait > 1000) await sleep(wait);
+  }
+}
 async function j(url) {
   const r = await fetch(url, { headers: ghHeaders });
-  if (r.status === 403) { // rate limited — wait for reset
+  if (r.status === 403 || r.status === 429) { // rate limited — wait for reset
+    const ra = Number(r.headers.get("retry-after"));
     const reset = Number(r.headers.get("x-ratelimit-reset")) * 1000;
-    const wait = Math.max(1000, reset - Date.now() + 2000);
+    const wait = ra ? ra * 1000 : Math.max(1000, reset - Date.now() + 2000);
     if (wait < 15 * 60000) { await sleep(wait); return j(url); }
   }
   if (!r.ok) throw new Error(`${r.status} ${url}`);
+  await paceOn(r);
   return r.json();
 }
 async function socials(login) {
@@ -162,6 +175,7 @@ async function gql(query) {
     if (wait < 60000) { await sleep(wait); return gql(query); } // short waits only; long ones -> throw -> REST fallback
   }
   if (!r.ok) throw new Error(`gql ${r.status}`);
+  await paceOn(r); // self-pace on the GraphQL points budget too
   return r.json();
 }
 // Resolve a single login via REST (fallback when GraphQL is saturated). Shapes the
@@ -186,7 +200,7 @@ async function profilesBatch(logins) {
   // REST fallback for whatever GraphQL didn't return (uses the SEPARATE REST budget,
   // so a GraphQL stall no longer zeroes everything). Bounded to protect REST quota.
   const missing = logins.filter((lg) => !out[lg.toLowerCase()]);
-  for (const lg of missing.slice(0, 40)) {
+  for (const lg of missing.slice(0, 20)) { // bounded — REST fallback amplifies REST load
     const p = await restProfile(lg);
     if (p) out[lg.toLowerCase()] = p;
   }

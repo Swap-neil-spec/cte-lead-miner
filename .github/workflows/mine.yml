@@ -2,7 +2,7 @@ name: lead-miner
 # Free-compute lead mining on GitHub Actions (no serverless time limit).
 on:
   schedule:
-    - cron: "17 */2 * * *"   # every 2 hours (~2x the miner's daily contribution)
+    - cron: "17 */6 * * *"   # every 6h — the 24/7 loop is primary; this just tops up (less token contention)
   workflow_dispatch: {}       # manual "Run workflow" button
 
 concurrency:
