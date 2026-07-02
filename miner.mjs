@@ -155,22 +155,41 @@ async function gql(query) {
     headers: { ...ghHeaders, "Content-Type": "application/json" },
     body: JSON.stringify({ query }),
   });
-  if (r.status === 403 || r.status === 429) { // rate/secondary limit — back off
+  if (r.status === 403 || r.status === 429) { // rate/secondary limit — back off ONCE, then let REST take over
+    const ra = Number(r.headers.get("retry-after")); // secondary limits use retry-after
     const reset = Number(r.headers.get("x-ratelimit-reset")) * 1000;
-    const wait = Math.max(2000, (reset || Date.now() + 60000) - Date.now() + 2000);
-    if (wait < 15 * 60000) { await sleep(wait); return gql(query); }
+    const wait = ra ? ra * 1000 : Math.max(2000, (reset || Date.now() + 30000) - Date.now() + 2000);
+    if (wait < 60000) { await sleep(wait); return gql(query); } // short waits only; long ones -> throw -> REST fallback
   }
   if (!r.ok) throw new Error(`gql ${r.status}`);
   return r.json();
+}
+// Resolve a single login via REST (fallback when GraphQL is saturated). Shapes the
+// result exactly like the GraphQL node so socialText()/the gate work unchanged.
+async function restProfile(login) {
+  try {
+    const p = await j(`https://api.github.com/users/${login}`);
+    if (!p || p.type !== "User") return null;
+    const urls = (await socials(login)).split(/\s+/).filter(Boolean).map((u) => ({ url: u }));
+    return { login, name: p.name, email: p.email, location: p.location, websiteUrl: p.blog, bio: p.bio, socialAccounts: { nodes: urls } };
+  } catch { return null; }
 }
 async function profilesBatch(logins) {
   const out = {};
   if (!logins.length) return out;
   const f = `login name email location websiteUrl bio socialAccounts(first:6){nodes{url}}`;
   const q = `query{` + logins.map((lg, i) => `u${i}:user(login:${JSON.stringify(lg)}){${f}}`).join(" ") + `}`;
-  let d;
-  try { d = await gql(q); } catch { return out; }
-  logins.forEach((lg, i) => { const u = d?.data?.[`u${i}`]; if (u) out[lg.toLowerCase()] = u; });
+  try {
+    const d = await gql(q);
+    logins.forEach((lg, i) => { const u = d?.data?.[`u${i}`]; if (u) out[lg.toLowerCase()] = u; });
+  } catch { /* GraphQL saturated — fall through to REST */ }
+  // REST fallback for whatever GraphQL didn't return (uses the SEPARATE REST budget,
+  // so a GraphQL stall no longer zeroes everything). Bounded to protect REST quota.
+  const missing = logins.filter((lg) => !out[lg.toLowerCase()]);
+  for (const lg of missing.slice(0, 40)) {
+    const p = await restProfile(lg);
+    if (p) out[lg.toLowerCase()] = p;
+  }
   return out;
 }
 function socialText(p) {
