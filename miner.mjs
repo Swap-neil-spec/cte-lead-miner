@@ -581,6 +581,59 @@ async function mineHNThread(id) {
   return rows;
 }
 
+// --- CNCF gitdm: 406k entries (~118k unique devs) with email+name+location IN the
+// data (email obfuscated as '!' for '@'). Only LinkedIn needs GitHub resolution.
+// Agent-team find — the biggest verified vein. --------------------------------------
+let CNCF = null;
+async function cncfUsers() {
+  if (CNCF) return CNCF;
+  try {
+    const d = await (await fetch("https://media.githubusercontent.com/media/cncf/gitdm/master/src/github_users.json")).json();
+    const byLogin = {};
+    for (const u of (Array.isArray(d) ? d : [])) {
+      const lg = u.login;
+      if (!lg) continue;
+      const email = validEmail(String(u.email || "").replace("!", "@")); // deobfuscate + filter noreply
+      if (!email) continue;
+      const k = lg.toLowerCase();
+      const cur = byLogin[k];
+      if (!cur) byLogin[k] = { login: lg, email, name: u.name || "", location: u.location || "" };
+      else { if (!cur.name && u.name) cur.name = u.name; if (!cur.location && u.location) cur.location = u.location; }
+    }
+    CNCF = Object.values(byLogin);
+  } catch { CNCF = []; }
+  return CNCF;
+}
+async function mineCNCF(page = 1) {
+  const users = await cncfUsers();
+  if (!users.length) return [];
+  const size = 200, start = ((page - 1) * size) % users.length;
+  const slice = users.slice(start, start + size).filter((u) => !SEEN.has("cncf:" + u.login.toLowerCase()));
+  slice.forEach((u) => SEEN.add("cncf:" + u.login.toLowerCase()));
+  const byLogin = {};
+  slice.forEach((u) => { byLogin[u.login.toLowerCase()] = u; });
+  const rows = [];
+  for (let i = 0; i < slice.length; i += 40) {
+    const chunk = slice.slice(i, i + 40).map((u) => u.login);
+    const profs = await profilesBatch(chunk); // GraphQL — just need LinkedIn from socials
+    for (const login of chunk) {
+      const g = byLogin[login.toLowerCase()];
+      const p = profs[login.toLowerCase()];
+      if (!p) continue;
+      const li = findLinkedin(socialText(p));
+      if (!li) continue; // LinkedIn required (the one field not in gitdm)
+      const email = validEmail(p.email) || g.email; // email from GitHub or gitdm
+      const { first, last } = nameParts(p.name || g.name, li);
+      if (!first) continue;
+      rows.push({
+        "First name": first, "Last name": last, Email: email, LinkedIn: li,
+        Location: p.location || g.location || "", Role: "software_engineer", Source: "contributors",
+      });
+    }
+  }
+  return rows;
+}
+
 async function mineGitlab(page = 1) {
   const users = await glJson(`https://gitlab.com/api/v4/users?per_page=100&page=${page}&active=true&without_project_bots=true`);
   if (!Array.isArray(users)) return [];
@@ -803,7 +856,7 @@ export {
   AUTH, sleep, j, socials, mineRepo, commitEmail, leadFromLogin, resolveLogins,
   mineProminent, mineNpm, mineStargazers, mineGraph, graphSeed,
   mineOrg, orgPool, ORGS, minePyPI, mineCrates, mineHF, mineJsonResume, mineOrcid,
-  hnWantsThreads, mineHNThread, AI_TOPICS, aiForkedRepos, mineForks, post,
+  hnWantsThreads, mineHNThread, mineCNCF, AI_TOPICS, aiForkedRepos, mineForks, post,
   fetchTopRepos, buildBatch, loadStats, reportStats, bumpYield, pickAdaptive, score,
   PROM_TIERS, NPM_TOPICS,
 };
@@ -894,6 +947,12 @@ async function runOnce() {
   const orcNew = await postAll(orc);
   stored += orcNew; mined += orc.length; bumpYield("orcid", orcNew);
   console.log(`orcid: ${orc.length} mined, ${orcNew} fresh`);
+
+  // CNCF gitdm — 118k devs with email+name in data; LinkedIn via GitHub (agent-team find).
+  const cncf = await mineCNCF((RUN % 500) + 1);
+  const cncfNew = await postAll(cncf);
+  stored += cncfNew; mined += cncf.length; bumpYield("cncf", cncfNew);
+  console.log(`cncf: ${cncf.length} mined, ${cncfNew} fresh`);
 
   // AI FOCUS — most-forked AI projects: mine BOTH contributors and forkers (Neil's directive).
   const aiTopic = AI_TOPICS[RUN % AI_TOPICS.length];
