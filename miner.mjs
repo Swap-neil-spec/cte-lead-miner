@@ -510,8 +510,10 @@ async function orcidJson(url) {
     return r.ok ? await r.json() : null;
   } catch { return null; }
 }
+// Field-filtered to tech/finance/legal (ORCID is mostly non-tech academics otherwise).
+const ORCID_Q = encodeURIComponent('"linkedin.com" AND ("machine learning" OR "computer science" OR "software" OR "data science" OR "artificial intelligence" OR engineer OR developer OR "deep learning" OR fintech OR quant OR "financial" OR lawyer OR attorney OR "legal")');
 async function mineOrcid(start = 0) {
-  const s = await orcidJson(`https://pub.orcid.org/v3.0/search/?q=%22linkedin.com%22&rows=100&start=${start}`);
+  const s = await orcidJson(`https://pub.orcid.org/v3.0/search/?q=${ORCID_Q}&rows=100&start=${start}`);
   const results = (s && s.result) || [];
   const rows = [];
   for (const r of results) {
@@ -525,19 +527,18 @@ async function mineOrcid(start = 0) {
     if (!email) continue; // public email required
     let li = null;
     for (const u of ((p["researcher-urls"] && p["researcher-urls"]["researcher-url"]) || [])) {
-      const v = u.url && u.url.value;
-      const found = findLinkedin(v || "");
+      const found = findLinkedin((u.url && u.url.value) || "");
       if (found) { li = found; break; }
     }
     if (!li) continue;
     const nm = p.name || {};
-    const first = (nm["given-names"] || {}).value;
-    const last = (nm["family-names"] || {}).value || "";
+    const full = `${(nm["given-names"] || {}).value || ""} ${(nm["family-names"] || {}).value || ""}`.trim();
+    const { first, last } = nameParts(full, li); // derive last from LinkedIn if missing (avoids ingest LLM path)
     if (!first) continue;
     const kw = ((p.keywords && p.keywords.keyword) || [])[0];
     rows.push({
       "First name": first, "Last name": last, Email: email, LinkedIn: li,
-      Location: "", Role: (kw && kw.content) || "researcher", Source: "orcid",
+      Location: "", Role: (kw && kw.content) || "software_engineer", Source: "orcid",
     });
     await sleep(40);
   }
