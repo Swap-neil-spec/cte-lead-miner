@@ -536,12 +536,48 @@ async function mineOrcid(start = 0) {
     const { first, last } = nameParts(full, li); // derive last from LinkedIn if missing (avoids ingest LLM path)
     if (!first) continue;
     const kw = ((p.keywords && p.keywords.keyword) || [])[0];
+    const addr = await orcidJson(`https://pub.orcid.org/v3.0/${oid}/address`); // fill location
+    const country = (((addr && addr.addresses && addr.addresses.address) || [])[0] || {}).country;
     rows.push({
       "First name": first, "Last name": last, Email: email, LinkedIn: li,
-      Location: "", Role: (kw && kw.content) || "software_engineer", Source: "orcid",
+      Location: (country && country.value) || "", Role: (kw && kw.content) || "software_engineer", Source: "orcid",
     });
     await sleep(40);
   }
+  return rows;
+}
+
+// --- HN "Who wants to be hired?" monthly archives: job SEEKERS self-post email +
+// linkedin. Free Algolia HN API, no auth, INDEPENDENT of GitHub. Agent-team spec. ---
+function decodeHtmlText(s) {
+  return String(s || "")
+    .replace(/&#x2F;/g, "/").replace(/&#x27;/g, "'").replace(/&#x3D;/g, "=")
+    .replace(/&amp;/g, "&").replace(/&lt;/g, "<").replace(/&gt;/g, ">").replace(/&quot;/g, '"')
+    .replace(/<[^>]+>/g, " ");
+}
+async function hnWantsThreads() {
+  try {
+    const r = await fetch("https://hn.algolia.com/api/v1/search?tags=story,author_whoishiring&query=wants%20to%20be%20hired&hitsPerPage=300");
+    const d = await r.json();
+    return (d.hits || []).filter((h) => /wants to be hired/i.test(h.title || "")).map((h) => h.objectID);
+  } catch { return []; }
+}
+async function mineHNThread(id) {
+  let d;
+  try { d = await (await fetch(`https://hn.algolia.com/api/v1/items/${id}`)).json(); } catch { return []; }
+  const rows = [];
+  const walk = (node) => {
+    if (!node) return;
+    const txt = decodeHtmlText(node.text || "");
+    const email = validEmail((txt.match(/[a-z0-9._%+\-]+@[a-z0-9.\-]+\.[a-z]{2,}/i) || [])[0]);
+    const li = findLinkedin(txt);
+    if (email && li) {
+      const { first, last } = nameParts(node.author || "", li); // real name from linkedin slug
+      if (first) rows.push({ "First name": first, "Last name": last, Email: email, LinkedIn: li, Location: "", Role: "software_engineer", Source: "hn" });
+    }
+    (node.children || []).forEach(walk);
+  };
+  walk(d);
   return rows;
 }
 
@@ -767,7 +803,7 @@ export {
   AUTH, sleep, j, socials, mineRepo, commitEmail, leadFromLogin, resolveLogins,
   mineProminent, mineNpm, mineStargazers, mineGraph, graphSeed,
   mineOrg, orgPool, ORGS, minePyPI, mineCrates, mineHF, mineJsonResume, mineOrcid,
-  AI_TOPICS, aiForkedRepos, mineForks, post,
+  hnWantsThreads, mineHNThread, AI_TOPICS, aiForkedRepos, mineForks, post,
   fetchTopRepos, buildBatch, loadStats, reportStats, bumpYield, pickAdaptive, score,
   PROM_TIERS, NPM_TOPICS,
 };
