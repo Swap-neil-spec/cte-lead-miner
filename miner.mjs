@@ -511,7 +511,20 @@ async function orcidJson(url) {
   } catch { return null; }
 }
 // Field-filtered to tech/finance/legal (ORCID is mostly non-tech academics otherwise).
-const ORCID_Q = encodeURIComponent('"linkedin.com" AND ("machine learning" OR "computer science" OR "software" OR "data science" OR "artificial intelligence" OR engineer OR developer OR "deep learning" OR fintech OR quant OR "financial" OR lawyer OR attorney OR "legal")');
+const ORCID_Q = encodeURIComponent('"linkedin.com" AND (' + [
+  // tech
+  '"machine learning"', '"deep learning"', '"artificial intelligence"', '"computer science"',
+  '"data science"', '"data engineer"', 'software', 'engineer', 'developer', 'programming',
+  'devops', '"cloud computing"', 'cybersecurity', 'security', 'blockchain', 'robotics',
+  '"computer vision"', '"natural language"', '"neural network"', 'algorithms', 'database',
+  'backend', 'frontend', '"full stack"', '"web development"', 'analytics', '"information technology"',
+  // finance
+  'finance', 'financial', 'fintech', 'quant', 'quantitative', 'investment', 'trading',
+  'banking', '"private equity"', '"venture capital"', 'accounting', 'actuarial', '"risk management"',
+  // legal
+  'lawyer', 'attorney', '"legal"', 'law', 'litigation', '"intellectual property"',
+  'compliance', 'regulatory', 'paralegal', 'counsel',
+].join(' OR ') + ')');
 async function mineOrcid(start = 0) {
   const s = await orcidJson(`https://pub.orcid.org/v3.0/search/?q=${ORCID_Q}&rows=100&start=${start}`);
   const results = (s && s.result) || [];
