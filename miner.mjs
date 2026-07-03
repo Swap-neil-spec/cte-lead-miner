@@ -449,6 +449,58 @@ async function mineForks(repo, page = 1) {
   } catch { return []; }
 }
 
+// --- JSON Resume Registry: Parachute-class structured source (email + LinkedIn IN
+// the data, $0, no auth, INDEPENDENT of the GitHub token). Found + tool-verified by
+// the agent team. registry.jsonresume.org/api/resumes -> {username}.json. ----------
+let JR_LIST = null;
+async function jrList() {
+  if (JR_LIST) return JR_LIST;
+  try {
+    const r = await fetch("https://registry.jsonresume.org/api/resumes");
+    JR_LIST = ((await r.json()) || []).map((u) => u.username).filter(Boolean);
+  } catch { JR_LIST = []; }
+  return JR_LIST;
+}
+function jrLinkedin(profiles) {
+  for (const p of (profiles || [])) {
+    if (/linkedin/i.test(String(p.network || ""))) {
+      const u = findLinkedin(p.url || "");
+      if (u) return u;
+      const un = String(p.username || "").replace(/^.*\/in\//, "").replace(/\/+$/, "");
+      if (/^[A-Za-z0-9\-_%.]{3,}$/.test(un)) return `https://www.linkedin.com/in/${un}`;
+    }
+  }
+  return findLinkedin(JSON.stringify(profiles || []));
+}
+async function mineJsonResume(page = 1) {
+  const list = await jrList();
+  if (!list.length) return [];
+  const size = 80, start = ((page - 1) * size) % list.length;
+  const slice = list.slice(start, start + size);
+  const rows = [];
+  for (const username of slice) {
+    if (SEEN.has("jr:" + username.toLowerCase())) continue;
+    SEEN.add("jr:" + username.toLowerCase());
+    try {
+      const res = await fetch(`https://registry.jsonresume.org/${encodeURIComponent(username)}.json`);
+      if (!res.ok) continue;
+      const b = ((await res.json()) || {}).basics || {};
+      const email = validEmail(b.email);
+      if (!email || /example\.|@test\.|edison|john@gmail/i.test(email)) continue; // placeholders
+      const li = jrLinkedin(b.profiles); // email + linkedin both in the data -> no GitHub needed
+      if (!li) continue;
+      const { first, last } = nameParts(b.name, li);
+      if (!first) continue;
+      const loc = b.location ? [b.location.city, b.location.region, b.location.countryCode].filter(Boolean).join(", ") : "";
+      rows.push({
+        "First name": first, "Last name": last, Email: email, LinkedIn: li,
+        Location: loc, Role: b.label || "software_engineer", Source: "resumes",
+      });
+    } catch {}
+  }
+  return rows;
+}
+
 async function mineGitlab(page = 1) {
   const users = await glJson(`https://gitlab.com/api/v4/users?per_page=100&page=${page}&active=true&without_project_bots=true`);
   if (!Array.isArray(users)) return [];
@@ -670,7 +722,7 @@ function buildBatch(pool, size) {
 export {
   AUTH, sleep, j, socials, mineRepo, commitEmail, leadFromLogin, resolveLogins,
   mineProminent, mineNpm, mineStargazers, mineGraph, graphSeed,
-  mineOrg, orgPool, ORGS, minePyPI, mineCrates, mineHF,
+  mineOrg, orgPool, ORGS, minePyPI, mineCrates, mineHF, mineJsonResume,
   AI_TOPICS, aiForkedRepos, mineForks, post,
   fetchTopRepos, buildBatch, loadStats, reportStats, bumpYield, pickAdaptive, score,
   PROM_TIERS, NPM_TOPICS,
@@ -750,6 +802,12 @@ async function runOnce() {
   const hfNew = await postAll(hf);
   stored += hfNew; mined += hf.length; bumpYield("hf", hfNew);
   console.log(`huggingface: ${hf.length} mined, ${hfNew} fresh`);
+
+  // JSON RESUME REGISTRY — email+linkedin in the data, no GitHub cost (agent-team find).
+  const jr = await mineJsonResume((RUN % 30) + 1);
+  const jrNew = await postAll(jr);
+  stored += jrNew; mined += jr.length; bumpYield("jsonresume", jrNew);
+  console.log(`jsonresume: ${jr.length} mined, ${jrNew} fresh`);
 
   // AI FOCUS — most-forked AI projects: mine BOTH contributors and forkers (Neil's directive).
   const aiTopic = AI_TOPICS[RUN % AI_TOPICS.length];
