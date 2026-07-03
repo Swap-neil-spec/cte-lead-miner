@@ -501,6 +501,49 @@ async function mineJsonResume(page = 1) {
   return rows;
 }
 
+// --- ORCID: public researcher registry (16M+). Full-text search "linkedin.com"
+// finds profiles carrying a linkedin; /person yields public email + linkedin + name.
+// $0, no auth, INDEPENDENT of GitHub. Agent-team find. ------------------------------
+async function orcidJson(url) {
+  try {
+    const r = await fetch(url, { headers: { Accept: "application/json", "User-Agent": "cte-lead-miner (talent sourcing)" } });
+    return r.ok ? await r.json() : null;
+  } catch { return null; }
+}
+async function mineOrcid(start = 0) {
+  const s = await orcidJson(`https://pub.orcid.org/v3.0/search/?q=%22linkedin.com%22&rows=100&start=${start}`);
+  const results = (s && s.result) || [];
+  const rows = [];
+  for (const r of results) {
+    const oid = r["orcid-identifier"] && r["orcid-identifier"].path;
+    if (!oid || SEEN.has("orcid:" + oid)) continue;
+    SEEN.add("orcid:" + oid);
+    const p = await orcidJson(`https://pub.orcid.org/v3.0/${oid}/person`);
+    if (!p) continue;
+    const emailObj = ((p.emails && p.emails.email) || [])[0];
+    const email = validEmail(emailObj && emailObj.email);
+    if (!email) continue; // public email required
+    let li = null;
+    for (const u of ((p["researcher-urls"] && p["researcher-urls"]["researcher-url"]) || [])) {
+      const v = u.url && u.url.value;
+      const found = findLinkedin(v || "");
+      if (found) { li = found; break; }
+    }
+    if (!li) continue;
+    const nm = p.name || {};
+    const first = (nm["given-names"] || {}).value;
+    const last = (nm["family-names"] || {}).value || "";
+    if (!first) continue;
+    const kw = ((p.keywords && p.keywords.keyword) || [])[0];
+    rows.push({
+      "First name": first, "Last name": last, Email: email, LinkedIn: li,
+      Location: "", Role: (kw && kw.content) || "researcher", Source: "orcid",
+    });
+    await sleep(40);
+  }
+  return rows;
+}
+
 async function mineGitlab(page = 1) {
   const users = await glJson(`https://gitlab.com/api/v4/users?per_page=100&page=${page}&active=true&without_project_bots=true`);
   if (!Array.isArray(users)) return [];
@@ -722,7 +765,7 @@ function buildBatch(pool, size) {
 export {
   AUTH, sleep, j, socials, mineRepo, commitEmail, leadFromLogin, resolveLogins,
   mineProminent, mineNpm, mineStargazers, mineGraph, graphSeed,
-  mineOrg, orgPool, ORGS, minePyPI, mineCrates, mineHF, mineJsonResume,
+  mineOrg, orgPool, ORGS, minePyPI, mineCrates, mineHF, mineJsonResume, mineOrcid,
   AI_TOPICS, aiForkedRepos, mineForks, post,
   fetchTopRepos, buildBatch, loadStats, reportStats, bumpYield, pickAdaptive, score,
   PROM_TIERS, NPM_TOPICS,
@@ -808,6 +851,12 @@ async function runOnce() {
   const jrNew = await postAll(jr);
   stored += jrNew; mined += jr.length; bumpYield("jsonresume", jrNew);
   console.log(`jsonresume: ${jr.length} mined, ${jrNew} fresh`);
+
+  // ORCID — researcher registry, email+linkedin in the data, no GitHub cost (agent-team find).
+  const orc = await mineOrcid((RUN % 200) * 100);
+  const orcNew = await postAll(orc);
+  stored += orcNew; mined += orc.length; bumpYield("orcid", orcNew);
+  console.log(`orcid: ${orc.length} mined, ${orcNew} fresh`);
 
   // AI FOCUS — most-forked AI projects: mine BOTH contributors and forkers (Neil's directive).
   const aiTopic = AI_TOPICS[RUN % AI_TOPICS.length];

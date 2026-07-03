@@ -13,7 +13,7 @@
 import {
   BASE, AUTH, sleep, post, mineRepo, mineProminent, mineNpm,
   mineStargazers, mineGraph, graphSeed, mineOrg, orgPool,
-  minePyPI, mineCrates, mineHF, mineJsonResume, AI_TOPICS, aiForkedRepos, mineForks,
+  minePyPI, mineCrates, mineHF, mineJsonResume, mineOrcid, AI_TOPICS, aiForkedRepos, mineForks,
   fetchTopRepos, buildBatch, loadStats, reportStats, bumpYield,
   pickAdaptive, score, PROM_TIERS, NPM_TOPICS,
 } from "./miner.mjs";
@@ -149,7 +149,7 @@ function sourceScores() {
     stars: score("stargazers"),
     graph: score("graph"),
     orgs: score("orgs"),
-    registries: Math.max(score("pypi"), score("crates"), score("hf"), score("jsonresume")),
+    registries: Math.max(score("pypi"), score("crates"), score("hf"), score("jsonresume"), score("orcid")),
   };
 }
 let starPage = 1, orgPage = 1, regPage = 1; // advance so coverage keeps expanding open-endedly
@@ -236,24 +236,29 @@ async function tick() {
     return `org ${org} p${page} +${rows.length}`;
   }
   if (type === "registries") {
-    // Rotate JSON-Resume / PyPI / crates.io / HuggingFace — structured + niche populations.
-    const p = regPage++, which = p % 4;
+    // Rotate ORCID / JSON-Resume / PyPI / crates / HuggingFace — structured + niche.
+    const p = regPage++, which = p % 5;
     if (which === 0) {
-      const rows = await mineJsonResume((Math.floor(p / 4) % 30) + 1); // email+linkedin in data, no GitHub cost
+      const rows = await mineOrcid(((Math.floor(p / 5)) % 250) * 100); // email+linkedin in data, no GitHub cost
+      stash("registries", "orcid", rows);
+      return `orcid +${rows.length}`;
+    }
+    if (which === 1) {
+      const rows = await mineJsonResume((Math.floor(p / 5) % 30) + 1);
       stash("registries", "jsonresume", rows);
       return `jsonresume +${rows.length}`;
     }
-    if (which === 1) {
-      const rows = await minePyPI((Math.floor(p / 4) % 300) + 1);
+    if (which === 2) {
+      const rows = await minePyPI((Math.floor(p / 5) % 300) + 1);
       stash("registries", "pypi", rows);
       return `pypi +${rows.length}`;
     }
-    if (which === 2) {
-      const rows = await mineCrates((Math.floor(p / 4) % 40) + 1);
+    if (which === 3) {
+      const rows = await mineCrates((Math.floor(p / 5) % 40) + 1);
       stash("registries", "crates", rows);
       return `crates +${rows.length}`;
     }
-    const rows = await mineHF((Math.floor(p / 4) % 20) + 1);
+    const rows = await mineHF((Math.floor(p / 5) % 20) + 1);
     stash("registries", "hf", rows);
     return `huggingface +${rows.length}`;
   }
